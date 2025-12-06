@@ -8,7 +8,8 @@ from utils import (
     normalize_plate,
     is_two_line_plate,
     split_two_line_plate,
-    validate_vn_plate_pattern
+    validate_vn_plate_pattern,
+    detect_individual_characters
 )
 
 # Load YOLO
@@ -154,10 +155,67 @@ if __name__ == "__main__":
             conf = p['ocr_conf']
             method = p['ocr_method']
         
-        # Get OCR results with bounding boxes for the best method
+        # IMPORTANT: Get the preprocessed image for the BEST METHOD (not the visualization final)
+        # This ensures BBox detection uses the same image that gave the best OCR result
+        from utils import preprocess_plate
+        if method == "inverted" or method == "inverted_high_contrast":
+            # For inverted methods, we need to invert the preprocessed image
+            if method == "inverted_high_contrast":
+                best_preprocessed = preprocess_plate(crop, variant="high_contrast")
+            else:
+                best_preprocessed = preprocess_plate(crop, variant="standard")
+            best_preprocessed = cv2.bitwise_not(best_preprocessed)
+        elif method == "adaptive_thresh":
+            # For adaptive threshold, use special preprocessing
+            h, w = crop.shape[:2]
+            scale = 4.0 if min(h, w) < 100 else 3.5
+            img_scale = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            if len(img_scale.shape) == 3:
+                gray_scale = cv2.cvtColor(img_scale, cv2.COLOR_BGR2GRAY)
+            else:
+                gray_scale = img_scale.copy()
+            padding = 20
+            gray_scale = cv2.copyMakeBorder(gray_scale, padding, padding, padding, padding, 
+                                           cv2.BORDER_CONSTANT, value=255)
+            best_preprocessed = cv2.adaptiveThreshold(
+                gray_scale, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 15, 5
+            )
+        elif method == "ultra_high_scale":
+            # For ultra high scale
+            h, w = crop.shape[:2]
+            scale = 6.0 if min(h, w) < 100 else 5.0
+            img_scale = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+            if len(img_scale.shape) == 3:
+                gray_scale = cv2.cvtColor(img_scale, cv2.COLOR_BGR2GRAY)
+            else:
+                gray_scale = img_scale.copy()
+            padding = 30
+            gray_scale = cv2.copyMakeBorder(gray_scale, padding, padding, padding, padding, 
+                                           cv2.BORDER_CONSTANT, value=255)
+            clahe_scale = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+            enhanced_scale = clahe_scale.apply(gray_scale)
+            kernel_scale = np.array([
+                [0, -1, 0],
+                [-1, 6, -1],
+                [0, -1, 0]
+            ])
+            best_preprocessed = cv2.filter2D(enhanced_scale, -1, kernel_scale)
+            best_preprocessed = np.clip(best_preprocessed, 0, 255).astype(np.uint8)
+        else:
+            # For other methods, use standard preprocessing with variant
+            variant_map = {
+                "standard": "standard",
+                "standard_sensitive": "standard",
+                "high_contrast": "high_contrast",
+                "sharp": "sharp",
+                "clean": "clean"
+            }
+            variant = variant_map.get(method, "standard")
+            best_preprocessed = preprocess_plate(crop, variant=variant)
+        
+        # Get OCR results with bounding boxes using the SAME preprocessed image as best method
         from utils import reader
-        # Use more sensitive parameters to detect individual characters
-        # Lower width_ths and height_ths to detect smaller text blocks (individual chars)
         ocr_params_bbox = {
             'detail': 1,
             'paragraph': False,
@@ -166,15 +224,50 @@ if __name__ == "__main__":
             'slope_ths': 0.1,
             'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
         }
-        ocr_results = reader.readtext(final, **ocr_params_bbox)
+        ocr_results = reader.readtext(best_preprocessed, **ocr_params_bbox)
+        
+        # DEBUG: Also try OCR with the same method that was selected
+        # to see if we get different results
+        print(f"\n=== DEBUG INFO ===")
+        print(f"Best method: {method}")
+        print(f"Raw OCR result: {raw}")
+        print(f"Normalized result: {plate}")
+        print(f"BBox detection (params: width_ths=0.1): {len(ocr_results)} blocks")
+        if ocr_results:
+            bbox_texts = [r[1] for r in ocr_results]
+            print(f"BBox texts: {bbox_texts}")
+            print(f"BBox combined: {''.join(bbox_texts)}")
+        
+        # Try OCR with same params as used in multi-pass
+        ocr_params_main = {
+            'detail': 1,
+            'paragraph': False,
+            'width_ths': 0.4,  # Same as in multi-pass
+            'height_ths': 0.4,
+            'slope_ths': 0.1,
+            'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+        }
+        ocr_results_main = reader.readtext(final, **ocr_params_main)
+        if ocr_results_main:
+            main_texts = [r[1] for r in ocr_results_main]
+            print(f"Main OCR (params: width_ths=0.4): {len(ocr_results_main)} blocks")
+            print(f"Main texts: {main_texts}")
+            print(f"Main combined: {''.join(main_texts)}")
+        
+        # Check pattern validation
+        from utils import validate_vn_plate_pattern, normalize_plate
+        print(f"\nPattern validation for '{raw}': {validate_vn_plate_pattern(raw)}")
+        print(f"After normalize: {normalize_plate(raw)}")
+        print(f"Expected: 51G31691")
+        print("=" * 50)
         
         # Figure 1: Preprocessing steps
         fig1, axes1 = plt.subplots(2, 4, figsize=(16, 8))
         axes1 = axes1.flatten()
         
         steps = [
-            ("1. Original", cv2.cvtColor(original, cv2.COLOR_BGR2RGB), None),
-            ("2. Upscaled", cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB), None),
+            ("1. Original", original, None),
+            ("2. Upscaled", upscaled, None),
             ("3. Grayscale", gray, "gray"),
             ("4. Padded", gray_padded, "gray"),
             ("5. Denoised", denoised, "gray"),
@@ -184,31 +277,81 @@ if __name__ == "__main__":
         ]
         
         for i, (title, img, cmap) in enumerate(steps):
-            if cmap:
-                axes1[i].imshow(img, cmap=cmap)
-            else:
-                axes1[i].imshow(img)
-            axes1[i].set_title(title, fontsize=10)
-            axes1[i].axis("off")
+            try:
+                # Convert to RGB if needed (for color images)
+                if cmap is None and len(img.shape) == 3:
+                    if img.shape[2] == 3:
+                        # BGR to RGB
+                        display_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    else:
+                        display_img = img
+                else:
+                    display_img = img
+                
+                if cmap:
+                    axes1[i].imshow(display_img, cmap=cmap)
+                else:
+                    axes1[i].imshow(display_img)
+                axes1[i].set_title(title, fontsize=10)
+                axes1[i].axis("off")
+            except Exception as e:
+                print(f"Error displaying {title}: {e}")
+                axes1[i].text(0.5, 0.5, f"Error\n{title}", 
+                             ha="center", va="center", fontsize=10)
+                axes1[i].axis("off")
         
         plt.suptitle("Preprocessing Pipeline Steps", fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.show()
         
+        # Detect individual characters using contour detection FIRST
+        individual_chars = detect_individual_characters(best_preprocessed, debug=True)
+        print(f"Contour detection: Found {len(individual_chars)} individual characters")
+        
+        # Figure 3: Contour detection steps (for debugging) - Show BEFORE OCR results
+        fig3, axes3 = plt.subplots(1, 3, figsize=(14, 4))
+        
+        # Show binary image used for contour detection
+        mean_val = np.mean(best_preprocessed)
+        is_inverted = mean_val < 127
+        if is_inverted:
+            _, binary_vis = cv2.threshold(best_preprocessed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        else:
+            _, binary_vis = cv2.threshold(best_preprocessed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+        binary_sep = cv2.morphologyEx(binary_vis, cv2.MORPH_OPEN, kernel_h, iterations=1)
+        
+        axes3[0].imshow(best_preprocessed, cmap="gray")
+        axes3[0].set_title("Preprocessed Image")
+        axes3[0].axis("off")
+        
+        axes3[1].imshow(binary_vis, cmap="gray")
+        axes3[1].set_title("Binary (for contours)")
+        axes3[1].axis("off")
+        
+        axes3[2].imshow(binary_sep, cmap="gray")
+        axes3[2].set_title("After Morph Open\n(to separate chars)")
+        axes3[2].axis("off")
+        
+        plt.suptitle("Contour Detection Steps", fontsize=12)
+        plt.tight_layout()
+        plt.show()
+        
         # Figure 2: OCR Results with Bounding Boxes
-        fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5))
+        fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
         
         # Original crop
         axes2[0].imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         axes2[0].set_title("Original Crop")
         axes2[0].axis("off")
         
-        # Final preprocessed with bounding boxes
-        final_with_boxes = final.copy()
+        # Final preprocessed with bounding boxes (use best method's preprocessed image)
+        final_with_boxes = best_preprocessed.copy()
         if len(final_with_boxes.shape) == 2:
             final_with_boxes = cv2.cvtColor(final_with_boxes, cv2.COLOR_GRAY2RGB)
         
-        # Draw bounding boxes and text
+        # Draw EasyOCR bounding boxes (text blocks) - GREEN boxes
         detected_chars = []
         total_chars_detected = 0
         if ocr_results:
@@ -224,8 +367,8 @@ if __name__ == "__main__":
                 else:
                     color = (255, 0, 0)  # Red - low confidence
                 
-                # Draw bounding box
-                cv2.polylines(final_with_boxes, [pts], True, color, 2)
+                # Draw bounding box (thicker for text blocks)
+                cv2.polylines(final_with_boxes, [pts], True, color, 3)
                 
                 # Get top-left corner for text label
                 x_coords = [p[0] for p in pts]
@@ -243,37 +386,69 @@ if __name__ == "__main__":
                 
                 detected_chars.append((text, conf_score, bbox, char_count))
         
+        # Draw individual character bounding boxes (from contour detection) - MAGENTA boxes
+        for i, (x, y, w, h, char_img) in enumerate(individual_chars):
+            # Draw thicker boxes for individual characters (magenta) to make them visible
+            cv2.rectangle(final_with_boxes, (x, y), (x+w, y+h), (255, 0, 255), 2)  # Magenta, thicker
+            cv2.putText(final_with_boxes, f"C{i}", (x, y-5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        
         # Add warning if only 1 box detected (might be reading as single block)
-        title_text = f"Detected: {len(ocr_results)} text block(s), {total_chars_detected} total chars"
+        title_text = f"EasyOCR: {len(ocr_results)} block(s), {total_chars_detected} chars"
+        title_text += f" | Contour: {len(individual_chars)} chars"
         if len(ocr_results) == 1 and total_chars_detected > 1:
-            title_text += "\n⚠️ Single block detected (may need character segmentation)"
+            title_text += "\n⚠️ Single block (EasyOCR grouped chars)"
         
         axes2[1].imshow(final_with_boxes)
-        axes2[1].set_title(f"EasyOCR Detection\n{title_text}\n(Method: {method})", fontsize=9)
+        axes2[1].set_title(f"Detection Results\n{title_text}\n(Method: {method})", fontsize=9)
         axes2[1].axis("off")
         
-        # Results with all attempts
-        result_text = (
-            f"Raw OCR: {raw}\n"
-            f"Normalized: {plate}\n"
-            f"YOLO Conf: {p['conf']:.2f}\n"
-            f"OCR Conf: {conf:.2f}\n"
-            f"Method: {method}\n"
-            f"Two-line: {p['two_line']}\n"
-        )
-        
-        if all_attempts:
-            result_text += f"\n--- All OCR Attempts (with Pattern Score) ---\n"
-            for attempt_text, attempt_conf, attempt_method in all_attempts:
-                marker = "✓" if attempt_method == method else " "
-                pattern_score = validate_vn_plate_pattern(attempt_text)
-                pattern_indicator = "✓" if pattern_score >= 0.7 else "✗" if pattern_score < 0.5 else "~"
-                result_text += f"{marker} {attempt_method}: {attempt_text}\n"
-                result_text += f"   conf: {attempt_conf:.2f} | pattern: {pattern_score:.2f} {pattern_indicator}\n"
-        
-        axes2[2].text(0.05, 0.5, result_text, fontsize=10, verticalalignment='center', 
-                     family='monospace', transform=axes2[2].transAxes)
-        axes2[2].axis("off")
-        
+        plt.suptitle("OCR Detection Results", fontsize=12, fontweight='bold')
         plt.tight_layout()
         plt.show()
+        
+        # Figure 4: Individual characters detected by contour
+        if individual_chars:
+            n_chars = len(individual_chars)
+            cols = min(8, n_chars)
+            rows = (n_chars + cols - 1) // cols
+            
+            fig3, axes3 = plt.subplots(rows, cols, figsize=(cols*1.5, rows*1.5))
+            
+            # Ensure axes3 is always a flat list/array
+            if rows == 1 and cols == 1:
+                axes3 = [axes3]
+            elif rows == 1:
+                axes3 = axes3.flatten() if hasattr(axes3, 'flatten') else list(axes3)
+            elif cols == 1:
+                axes3 = axes3.flatten() if hasattr(axes3, 'flatten') else list(axes3)
+            else:
+                axes3 = axes3.flatten()
+            
+            for i, (x, y, w, h, char_img) in enumerate(individual_chars):
+                if i < len(axes3):
+                    axes3[i].imshow(char_img, cmap="gray")
+                    axes3[i].set_title(f"Char {i}\n({w}x{h})", fontsize=8)
+                    axes3[i].axis("off")
+            
+            # Hide unused subplots
+            for i in range(n_chars, len(axes3)):
+                axes3[i].axis("off")
+            
+            plt.suptitle(f"Individual Characters Detected by Contour ({n_chars} chars)", fontsize=12)
+            plt.tight_layout()
+            plt.show()
+            
+            print(f"\n=== Individual Characters (Contour Detection) ===")
+            print(f"Detected {len(individual_chars)} characters:")
+            for i, (x, y, w, h, _) in enumerate(individual_chars):
+                print(f"  Char {i}: BBox=({x},{y},{w},{h})")
+        else:
+            print(f"\n⚠️  Contour detection found 0 characters!")
+            print(f"   This might be because:")
+            print(f"   1. Characters are too connected (morphological operations didn't separate them)")
+            print(f"   2. Filtering thresholds are too strict")
+            print(f"   3. Preprocessing made characters merge together")
+        
+        # Results summary (printed to console, not displayed in figure)
+        # All OCR attempts are already printed in debug output above

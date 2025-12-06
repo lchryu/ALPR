@@ -7,6 +7,84 @@ import easyocr
 reader = easyocr.Reader(['en'])
 
 # ----------------------------------------------------------
+# Detect individual characters using contour detection
+# ----------------------------------------------------------
+def detect_individual_characters(preprocessed_img, debug=False):
+    """
+    Detect and separate individual characters using contour detection.
+    Returns: list of (x, y, w, h, char_img) sorted left to right
+    """
+    # Create binary image - try both normal and inverted
+    # For inverted images (white text on black), we need normal threshold
+    # For normal images (black text on white), we need inverted threshold
+    
+    # Check if image is mostly dark (inverted) or mostly light (normal)
+    mean_val = np.mean(preprocessed_img)
+    is_inverted = mean_val < 127
+    
+    if is_inverted:
+        # Inverted image: white text on black background
+        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        # Normal image: black text on white background
+        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Morphological operations to separate characters
+    # Use horizontal kernel to create gaps between characters
+    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal, iterations=1)
+    
+    # Find contours
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    char_boxes = []
+    h_img, w_img = preprocessed_img.shape[:2]
+    
+    if debug:
+        print(f"  DEBUG contour: Found {len(contours)} contours, img_size={w_img}x{h_img}")
+    
+    for i, contour in enumerate(contours):
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Filter by size and aspect ratio
+        area = w * h
+        img_area = h_img * w_img
+        min_area = img_area * 0.002  # 0.2% of image
+        max_area = img_area * 0.15    # Reduced from 0.3 to 0.15 (15% max) - exclude large blocks
+        
+        aspect_ratio = h / w if w > 0 else 0
+        min_height = h_img * 0.20  # Increased to 20% (filter out very small noise)
+        max_height = h_img * 0.60   # Max 60% (filter out very large blocks)
+        
+        if debug and i < 15:  # Debug first 15 contours
+            print(f"    Contour {i}: area={area:.0f} ({area/img_area*100:.2f}%), "
+                  f"aspect={aspect_ratio:.2f}, h={h} ({h/h_img*100:.1f}%), "
+                  f"w={w}, h_min={min_height:.0f}, h_max={max_height:.0f}")
+        
+        # Better filtering: exclude very large blocks and very small noise
+        if (min_area < area < max_area and 
+            0.2 < aspect_ratio < 5.0 and
+            min_height < h < max_height and  # Height must be in reasonable range
+            w > 3 and h > 3):  # Minimum size
+            # Add padding
+            padding = max(2, min(w, h) // 6)
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(w_img - x, w + 2 * padding)
+            h = min(h_img - y, h + 2 * padding)
+            
+            char_img = preprocessed_img[y:y+h, x:x+w]
+            char_boxes.append((x, y, w, h, char_img))
+    
+    # Sort left to right
+    char_boxes.sort(key=lambda box: box[0])
+    
+    if debug:
+        print(f"  DEBUG contour: After filtering: {len(char_boxes)} characters detected")
+    
+    return char_boxes
+
+# ----------------------------------------------------------
 # Detect if plate is 2-line or 1-line based on aspect ratio
 # ----------------------------------------------------------
 def is_two_line_plate(crop):
@@ -109,9 +187,19 @@ def preprocess_plate(img, variant="standard"):
     # Use Otsu's method to automatically find optimal threshold
     _, binary = cv2.threshold(final, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
+    # IMPORTANT: Add spacing between characters to help EasyOCR detect them separately
+    # Use morphological opening with horizontal kernel to separate characters
+    # This creates small gaps between characters without breaking them
+    kernel_separate = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 1))  # Horizontal kernel
+    binary_separated = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_separate, iterations=1)
+    
+    # Blend: 70% separated binary + 30% original binary
+    # Separated helps character detection, original preserves shape
+    binary_final = cv2.addWeighted(binary_separated, 0.7, binary, 0.3, 0)
+    
     # Blend: 80% binary (strong contrast) + 20% original (preserve some detail)
     # This creates very dark text on very bright background
-    final = cv2.addWeighted(binary, 0.8, final, 0.2, 0)
+    final = cv2.addWeighted(binary_final, 0.8, final, 0.2, 0)
     
     # Final normalization
     final = np.clip(final, 0, 255).astype(np.uint8)
@@ -304,6 +392,19 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         # Combined score: 70% confidence + 30% pattern validation
         combined_score = conf * 0.7 + pattern_score * 0.3
         scored_attempts.append((text, conf, method, combined_score, pattern_score))
+        
+        # DEBUG: Print pattern validation details
+        if return_all_attempts:
+            clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
+            pos3_char = clean_text[2] if len(clean_text) > 2 else "N/A"
+            pos3_type = "LETTER" if pos3_char.isalpha() else "NUMBER"
+            print(f"  DEBUG: {method}: text='{text}' -> clean='{clean_text}' -> pos3='{pos3_char}' ({pos3_type}) -> pattern={pattern_score:.2f}")
+        
+        # DEBUG: Print pattern validation details
+        if return_all_attempts:
+            clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
+            pos3_char = clean_text[2] if len(clean_text) > 2 else "N/A"
+            print(f"  DEBUG: {method}: text='{text}' -> clean='{clean_text}' -> pos3='{pos3_char}' -> pattern={pattern_score:.2f}")
     
     # Sort by combined score (descending)
     scored_attempts.sort(key=lambda x: x[3], reverse=True)
