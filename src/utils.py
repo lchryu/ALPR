@@ -31,8 +31,13 @@ def detect_individual_characters(preprocessed_img, debug=False):
     
     # Morphological operations to separate characters
     # Use horizontal kernel to create gaps between characters
-    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal, iterations=1)
+    # Try stronger separation for merged characters
+    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))  # Larger kernel (was 3,1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal, iterations=2)  # More iterations (was 1)
+    
+    # Additional step: Try vertical erosion to separate vertically connected parts
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_vertical, iterations=1)
     
     # Find contours
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -43,6 +48,8 @@ def detect_individual_characters(preprocessed_img, debug=False):
     if debug:
         print(f"  DEBUG contour: Found {len(contours)} contours, img_size={w_img}x{h_img}")
     
+    # First pass: collect all valid contours with their bounding boxes
+    valid_contours = []
     for i, contour in enumerate(contours):
         x, y, w, h = cv2.boundingRect(contour)
         
@@ -53,8 +60,8 @@ def detect_individual_characters(preprocessed_img, debug=False):
         max_area = img_area * 0.15    # Reduced from 0.3 to 0.15 (15% max) - exclude large blocks
         
         aspect_ratio = h / w if w > 0 else 0
-        min_height = h_img * 0.20  # Increased to 20% (filter out very small noise)
-        max_height = h_img * 0.60   # Max 60% (filter out very large blocks)
+        min_height = h_img * 0.15  # Reduced to 15% (allow smaller characters)
+        max_height = h_img * 0.85   # Increased to 85% (allow taller characters, but still filter huge blocks)
         
         if debug and i < 15:  # Debug first 15 contours
             print(f"    Contour {i}: area={area:.0f} ({area/img_area*100:.2f}%), "
@@ -66,12 +73,44 @@ def detect_individual_characters(preprocessed_img, debug=False):
             0.2 < aspect_ratio < 5.0 and
             min_height < h < max_height and  # Height must be in reasonable range
             w > 3 and h > 3):  # Minimum size
+            valid_contours.append((x, y, w, h, area))
+    
+    # Second pass: remove nested contours (smaller contours inside larger ones)
+    # Sort by area (largest first) to check nesting
+    valid_contours.sort(key=lambda c: c[4], reverse=True)
+    char_boxes = []
+    
+    for i, (x1, y1, w1, h1, area1) in enumerate(valid_contours):
+        is_nested = False
+        
+        # Check if this contour is nested inside a larger one
+        for j, (x2, y2, w2, h2, area2) in enumerate(valid_contours):
+            if i == j or area2 <= area1:
+                continue
+            
+            # Check if contour 1 is inside contour 2
+            # Allow some margin (10%) for slight misalignment
+            margin = 0.1
+            if (x2 - margin*w2 <= x1 <= x2 + w2 + margin*w2 and
+                y2 - margin*h2 <= y1 <= y2 + h2 + margin*h2 and
+                x2 - margin*w2 <= x1 + w1 <= x2 + w2 + margin*w2 and
+                y2 - margin*h2 <= y1 + h1 <= y2 + h2 + margin*h2):
+                # Check if area overlap is significant (>50% of smaller contour)
+                overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+                overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                overlap_area = overlap_x * overlap_y
+                
+                if overlap_area > 0.5 * min(area1, area2):
+                    is_nested = True
+                    break
+        
+        if not is_nested:
             # Add padding
-            padding = max(2, min(w, h) // 6)
-            x = max(0, x - padding)
-            y = max(0, y - padding)
-            w = min(w_img - x, w + 2 * padding)
-            h = min(h_img - y, h + 2 * padding)
+            padding = max(2, min(w1, h1) // 6)
+            x = max(0, x1 - padding)
+            y = max(0, y1 - padding)
+            w = min(w_img - x, w1 + 2 * padding)
+            h = min(h_img - y, h1 + 2 * padding)
             
             char_img = preprocessed_img[y:y+h, x:x+w]
             char_boxes.append((x, y, w, h, char_img))
@@ -101,9 +140,138 @@ def split_two_line_plate(crop):
     return crop[0:mid, :], crop[mid:h, :]
 
 # ----------------------------------------------------------
+# Deskew / Rotation Correction
+# ----------------------------------------------------------
+def deskew_plate(img, angle_threshold=2.0, debug=False):
+    """
+    Detect and correct rotation/skew in license plate image.
+    Only applies correction if angle exceeds threshold (to avoid affecting horizontal plates).
+    
+    Args:
+        img: Input image (BGR or grayscale)
+        angle_threshold: Minimum angle (degrees) to trigger correction (default: 2.0)
+        debug: If True, print detected angle (default: False)
+    
+    Returns:
+        Corrected image (same format as input)
+    """
+    # Convert to grayscale if needed
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
+    
+    # Skip deskew for very small images (not enough data for reliable angle detection)
+    h, w = gray.shape[:2]
+    if min(h, w) < 30:
+        if debug:
+            print(f"  Deskew: Image too small ({w}x{h}), skipping")
+        return img
+    
+    # Method 1: Use minAreaRect on text contours
+    # Create binary image to find text regions
+    # Try both normal and inverted thresholds to handle different plate styles
+    _, binary1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, binary2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Find contours for both
+    contours1, _ = cv2.findContours(binary1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours2, _ = cv2.findContours(binary2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Use the binary with more/larger contours
+    if len(contours1) > len(contours2) or (contours1 and not contours2):
+        binary = binary1
+        contours = contours1
+    else:
+        binary = binary2
+        contours = contours2
+    
+    if not contours:
+        return img  # No contours found, return original
+    
+    # Find the largest contour (should be the plate text region)
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    # Get minimum area rectangle
+    rect = cv2.minAreaRect(largest_contour)
+    angle = rect[2]
+    
+    # Normalize angle to [-45, 45] range
+    if angle < -45:
+        angle += 90
+    elif angle > 45:
+        angle -= 90
+    
+    # Only correct if angle exceeds threshold
+    if abs(angle) < angle_threshold:
+        if debug:
+            print(f"  Deskew: Angle {angle:.2f}° < threshold {angle_threshold}°, skipping correction")
+        return img  # Plate is already horizontal enough
+    
+    if debug:
+        print(f"  Deskew: Detected angle {angle:.2f}°, applying correction")
+    
+    # Method 2: Fallback to projection profile method if minAreaRect gives extreme angle
+    if abs(angle) > 30:
+        # Try projection profile method
+        # Re-create binary for projection method
+        _, binary_proj = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        angles = np.arange(-15, 15, 0.5)
+        best_angle = 0
+        best_score = 0
+        
+        for test_angle in angles:
+            # Rotate image
+            center = (gray.shape[1] // 2, gray.shape[0] // 2)
+            M = cv2.getRotationMatrix2D(center, test_angle, 1.0)
+            rotated = cv2.warpAffine(binary_proj, M, (gray.shape[1], gray.shape[0]), 
+                                   flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            
+            # Calculate horizontal projection variance (higher = better alignment)
+            h_projection = np.sum(rotated, axis=1)
+            score = np.var(h_projection)
+            
+            if score > best_score:
+                best_score = score
+                best_angle = test_angle
+        
+        if abs(best_angle) >= angle_threshold:
+            angle = best_angle
+    
+    # Apply rotation correction
+    h, w = img.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    # Calculate new dimensions to avoid cropping
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+    
+    # Adjust rotation matrix for new center
+    M[0, 2] += (new_w / 2) - center[0]
+    M[1, 2] += (new_h / 2) - center[1]
+    
+    # Apply rotation
+    if len(img.shape) == 3:
+        corrected = cv2.warpAffine(img, M, (new_w, new_h), 
+                                   flags=cv2.INTER_CUBIC, 
+                                   borderMode=cv2.BORDER_CONSTANT, 
+                                   borderValue=(255, 255, 255))
+    else:
+        corrected = cv2.warpAffine(img, M, (new_w, new_h), 
+                                   flags=cv2.INTER_CUBIC, 
+                                   borderMode=cv2.BORDER_CONSTANT, 
+                                   borderValue=255)
+    
+    return corrected
+
+# ----------------------------------------------------------
 # Preprocess plate - Optimized for EasyOCR
 # ----------------------------------------------------------
-def preprocess_plate(img, variant="standard"):
+def preprocess_plate(img, variant="standard", apply_deskew=True):
     """
     Clean preprocessing pipeline optimized for EasyOCR.
     Focuses on clarity without destroying texture.
@@ -111,7 +279,12 @@ def preprocess_plate(img, variant="standard"):
     Args:
         img: Input image (BGR or grayscale)
         variant: "standard", "high_contrast", "sharp", "clean"
+        apply_deskew: Whether to apply rotation correction (default: True)
     """
+    # 0. Deskew/rotation correction (applied first, before upscaling)
+    if apply_deskew:
+        img = deskew_plate(img, angle_threshold=2.0, debug=True)
+    
     h, w = img.shape[:2]
     
     # 1. Upscale intelligently - larger scale for better OCR (especially for letter/number distinction)
@@ -216,7 +389,9 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
     """
     if not use_multi_pass:
         # Single pass - simple and fast
-        preprocessed = preprocess_plate(img, variant="standard")
+        # Deskew first, then preprocess
+        img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=True)
+        preprocessed = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
         results = reader.readtext(
             preprocessed, 
             detail=1, 
@@ -261,8 +436,12 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
     }
     
-    # Pass 1: Standard preprocessing
-    pre1 = preprocess_plate(img, variant="standard")
+    # Deskew ONCE before all preprocessing variants (to avoid redundant processing)
+    # This ensures rotation correction is applied only once, not 12+ times
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=True)
+    
+    # Pass 1: Standard preprocessing (deskew already applied, skip it in preprocess_plate)
+    pre1 = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
     results1 = reader.readtext(pre1, **ocr_params)
     if results1:
         text1 = "".join([r[1] for r in results1])
@@ -276,24 +455,24 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         conf1b = np.mean([r[2] for r in results1b])
         attempts.append((text1b, conf1b, "standard_sensitive"))
     
-    # Pass 2: High contrast variant
-    pre2 = preprocess_plate(img, variant="high_contrast")
+    # Pass 2: High contrast variant (deskew already applied)
+    pre2 = preprocess_plate(img_deskewed, variant="high_contrast", apply_deskew=False)
     results2 = reader.readtext(pre2, **ocr_params)
     if results2:
         text2 = "".join([r[1] for r in results2])
         conf2 = np.mean([r[2] for r in results2])
         attempts.append((text2, conf2, "high_contrast"))
     
-    # Pass 3: Sharp variant
-    pre3 = preprocess_plate(img, variant="sharp")
+    # Pass 3: Sharp variant (deskew already applied)
+    pre3 = preprocess_plate(img_deskewed, variant="sharp", apply_deskew=False)
     results3 = reader.readtext(pre3, **ocr_params)
     if results3:
         text3 = "".join([r[1] for r in results3])
         conf3 = np.mean([r[2] for r in results3])
         attempts.append((text3, conf3, "sharp"))
     
-    # Pass 4: Clean variant (more denoising)
-    pre4 = preprocess_plate(img, variant="clean")
+    # Pass 4: Clean variant (more denoising, deskew already applied)
+    pre4 = preprocess_plate(img_deskewed, variant="clean", apply_deskew=False)
     results4 = reader.readtext(pre4, **ocr_params)
     if results4:
         text4 = "".join([r[1] for r in results4])
@@ -302,7 +481,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
     
     # Pass 5: Inverted (for dark text on light background)
     # This often works better for plates with light background
-    pre5 = preprocess_plate(img, variant="standard")
+    pre5 = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
     inverted = cv2.bitwise_not(pre5)
     results5 = reader.readtext(inverted, **ocr_params)
     if results5:
@@ -311,7 +490,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         attempts.append((text5, conf5, "inverted"))
     
     # Pass 5b: Inverted with high contrast
-    pre5b = preprocess_plate(img, variant="high_contrast")
+    pre5b = preprocess_plate(img_deskewed, variant="high_contrast", apply_deskew=False)
     inverted5b = cv2.bitwise_not(pre5b)
     results5b = reader.readtext(inverted5b, **ocr_params)
     if results5b:
@@ -320,9 +499,9 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         attempts.append((text5b, conf5b, "inverted_high_contrast"))
     
     # Pass 6: Very high scale for maximum clarity (especially for G vs 6)
-    h, w = img.shape[:2]
+    h, w = img_deskewed.shape[:2]
     scale = 6.0 if min(h, w) < 100 else 5.0  # Very high scale
-    img6 = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    img6 = cv2.resize(img_deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
     if len(img6.shape) == 3:
         gray6 = cv2.cvtColor(img6, cv2.COLOR_BGR2GRAY)
     else:
@@ -353,9 +532,9 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         attempts.append((text6, conf6, "ultra_high_scale"))
     
     # Pass 7: Adaptive threshold variant
-    h, w = img.shape[:2]
+    h, w = img_deskewed.shape[:2]
     scale7 = 4.0 if min(h, w) < 100 else 3.5
-    img7 = cv2.resize(img, None, fx=scale7, fy=scale7, interpolation=cv2.INTER_CUBIC)
+    img7 = cv2.resize(img_deskewed, None, fx=scale7, fy=scale7, interpolation=cv2.INTER_CUBIC)
     if len(img7.shape) == 3:
         gray7 = cv2.cvtColor(img7, cv2.COLOR_BGR2GRAY)
     else:

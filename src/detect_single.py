@@ -78,22 +78,27 @@ def detect_plate(image_path, use_multi_pass=True):
 
 
 if __name__ == "__main__":
-    image_path = r"../data/test/images/test.jpg"
+    image_path = r"../data/test/images/car5.jpg"
 
     # Use multi-pass OCR for better accuracy
     img, plates = detect_plate(image_path, use_multi_pass=True)
 
     # Print results
+    print("\n" + "="*70)
+    print(" " * 20 + "🎯 FINAL OCR RESULTS 🎯")
+    print("="*70)
     for p in plates:
         raw = p['raw']
         plate = p['plate']
         # Show difference if any
         diff_indicator = "✓" if raw == plate else "→"
         print(
-            f"Raw OCR: {raw} {diff_indicator} Normalized: {plate} | "
-            f"YOLO Conf: {p['conf']:.2f} | OCR Conf: {p['ocr_conf']:.2f} | "
-            f"Method: {p['ocr_method']} | TwoLine: {p['two_line']}"
+            f"\n📋 License Plate: {plate}"
+            f"\n   Raw OCR: {raw} {diff_indicator} Normalized: {plate}"
+            f"\n   Confidence: YOLO={p['conf']:.2f} | OCR={p['ocr_conf']:.2f}"
+            f"\n   Method: {p['ocr_method']} | TwoLine: {p['two_line']}"
         )
+    print("="*70 + "\n")
 
     # Visualize results with full pipeline steps
     for p in plates:
@@ -101,37 +106,42 @@ if __name__ == "__main__":
         
         # Get all preprocessing steps
         import numpy as np
-        h, w = crop.shape[:2]
+        from utils import deskew_plate
         
         # Step 1: Original
         original = crop.copy()
         
-        # Step 2: Upscaled
-        scale = 4.0 if min(h, w) < 100 else 3.5
-        upscaled = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # Step 2: Deskewed (rotation correction)
+        deskewed = deskew_plate(crop, angle_threshold=2.0, debug=False)
         
-        # Step 3: Grayscale
+        h, w = deskewed.shape[:2]
+        
+        # Step 3: Upscaled
+        scale = 4.0 if min(h, w) < 100 else 3.5
+        upscaled = cv2.resize(deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        
+        # Step 4: Grayscale
         if len(upscaled.shape) == 3:
             gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
         else:
             gray = upscaled.copy()
         
-        # Step 4: With padding
+        # Step 5: With padding
         padding_top, padding_bottom, padding_left, padding_right = 20, 20, 20, 40
         gray_padded = cv2.copyMakeBorder(gray, padding_top, padding_bottom, padding_left, padding_right, 
                                         cv2.BORDER_CONSTANT, value=255)
         
-        # Step 5: Denoised
+        # Step 6: Denoised
         if min(gray_padded.shape) > 100:
             denoised = cv2.fastNlMeansDenoising(gray_padded, h=5, templateWindowSize=7, searchWindowSize=21)
         else:
             denoised = cv2.bilateralFilter(gray_padded, 3, 40, 40)
         
-        # Step 6: CLAHE
+        # Step 7: CLAHE
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         clahe_applied = clahe.apply(denoised)
         
-        # Step 7: Sharpened
+        # Step 8: Sharpened
         kernel = np.array([
             [0, -0.3, 0],
             [-0.3, 3.2, -0.3],
@@ -140,7 +150,7 @@ if __name__ == "__main__":
         sharpened = cv2.filter2D(clahe_applied, -1, kernel)
         sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
         
-        # Step 8: Final contrast enhancement (make text darker, background brighter)
+        # Step 9: Final contrast enhancement (make text darker, background brighter)
         _, binary = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         final = cv2.addWeighted(binary, 0.8, sharpened, 0.2, 0)
         final = np.clip(final, 0, 255).astype(np.uint8)
@@ -258,22 +268,22 @@ if __name__ == "__main__":
         from utils import validate_vn_plate_pattern, normalize_plate
         print(f"\nPattern validation for '{raw}': {validate_vn_plate_pattern(raw)}")
         print(f"After normalize: {normalize_plate(raw)}")
-        print(f"Expected: 51G31691")
         print("=" * 50)
         
-        # Figure 1: Preprocessing steps
-        fig1, axes1 = plt.subplots(2, 4, figsize=(16, 8))
+        # Figure 1: Preprocessing steps (now with 9 steps including deskew)
+        fig1, axes1 = plt.subplots(3, 3, figsize=(15, 12))
         axes1 = axes1.flatten()
         
         steps = [
             ("1. Original", original, None),
-            ("2. Upscaled", upscaled, None),
-            ("3. Grayscale", gray, "gray"),
-            ("4. Padded", gray_padded, "gray"),
-            ("5. Denoised", denoised, "gray"),
-            ("6. CLAHE", clahe_applied, "gray"),
-            ("7. Sharpened", sharpened, "gray"),
-            ("8. Contrast Enhanced", final, "gray"),
+            ("2. Deskewed", deskewed, None),
+            ("3. Upscaled", upscaled, None),
+            ("4. Grayscale", gray, "gray"),
+            ("5. Padded", gray_padded, "gray"),
+            ("6. Denoised", denoised, "gray"),
+            ("7. CLAHE", clahe_applied, "gray"),
+            ("8. Sharpened", sharpened, "gray"),
+            ("9. Contrast Enhanced", final, "gray"),
         ]
         
         for i, (title, img, cmap) in enumerate(steps):
