@@ -23,231 +23,323 @@ def split_two_line_plate(crop):
     return crop[0:mid, :], crop[mid:h, :]
 
 # ----------------------------------------------------------
-# Preprocess - Tối ưu cho EasyOCR
+# Preprocess plate - Optimized for EasyOCR
 # ----------------------------------------------------------
-def preprocess(crop):
-    # Kiểm tra kích thước tối thiểu
-    h, w = crop.shape[:2]
+def preprocess_plate(img, variant="standard"):
+    """
+    Clean preprocessing pipeline optimized for EasyOCR.
+    Focuses on clarity without destroying texture.
     
-    # Upscale thông minh: nếu ảnh quá nhỏ thì scale lớn hơn
+    Args:
+        img: Input image (BGR or grayscale)
+        variant: "standard", "high_contrast", "sharp", "clean"
+    """
+    h, w = img.shape[:2]
+    
+    # 1. Upscale intelligently - larger scale for better OCR (especially for letter/number distinction)
     if min(h, w) < 50:
-        scale = 4.0
+        scale = 5.0  # Very high scale for tiny images
     elif min(h, w) < 100:
-        scale = 3.0
+        scale = 4.5  # High scale for small images
     else:
-        scale = 2.5
+        scale = 4.0  # Higher scale for better character clarity
     
-    # Resize với interpolation tốt
-    crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    # Convert to grayscale
-    if len(crop.shape) == 3:
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    # 2. Convert to grayscale
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
-        gray = crop.copy()
+        gray = img.copy()
     
-    # Denoise với Non-local Means (tốt hơn bilateral cho text)
-    # Nếu ảnh quá nhỏ thì dùng bilateral thay vì NLM (NLM chậm)
-    if min(gray.shape) > 100:
-        gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+    # 3. Add padding to avoid edge artifacts
+    padding = 20
+    gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, 
+                             cv2.BORDER_CONSTANT, value=255)
+    
+    # 4. Denoising based on variant
+    if variant == "clean":
+        # More aggressive denoising
+        if min(gray.shape) > 100:
+            gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+        else:
+            gray = cv2.bilateralFilter(gray, 7, 75, 75)
     else:
-        gray = cv2.bilateralFilter(gray, 5, 50, 50)
+        # Gentle denoising
+        if min(gray.shape) > 100:
+            gray = cv2.fastNlMeansDenoising(gray, h=7, templateWindowSize=7, searchWindowSize=21)
+        else:
+            gray = cv2.bilateralFilter(gray, 5, 50, 50)
     
-    # CLAHE (Contrast Limited Adaptive Histogram Equalization) - tốt hơn equalizeHist
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
+    # 5. CLAHE for adaptive contrast
+    if variant == "high_contrast":
+        clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
+    else:
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
     
-    # Adaptive threshold để tạo binary image (tùy chọn)
-    # Thử adaptive threshold để tách foreground/background tốt hơn
-    adaptive_thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 11, 2
-    )
+    # 6. Sharpening based on variant
+    if variant == "sharp":
+        # Stronger sharpening
+        kernel = np.array([
+            [0, -1, 0],
+            [-1, 5, -1],
+            [0, -1, 0]
+        ])
+    else:
+        # Moderate sharpening
+        kernel = np.array([
+            [0, -0.5, 0],
+            [-0.5, 3.5, -0.5],
+            [0, -0.5, 0]
+        ])
+    sharp = cv2.filter2D(enhanced, -1, kernel)
     
-    # Morphological operations để làm sạch
-    # Đóng các lỗ nhỏ trong chữ
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    adaptive_thresh = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_CLOSE, kernel_close)
-    
-    # Mở để loại bỏ noise nhỏ
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-    adaptive_thresh = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_OPEN, kernel_open)
-    
-    # Blend: 60% adaptive threshold + 40% CLAHE gray
-    # Adaptive threshold giúp tách chữ rõ, CLAHE giữ texture
-    final = cv2.addWeighted(adaptive_thresh, 0.6, gray, 0.4, 0)
-    
-    # Sharpen nhẹ để làm nét chữ
-    kernel_sharpen = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-    final = cv2.filter2D(final, -1, kernel_sharpen)
-    
-    # Normalize về [0, 255]
-    final = np.clip(final, 0, 255).astype(np.uint8)
+    # 7. Normalize to [0, 255]
+    final = np.clip(sharp, 0, 255).astype(np.uint8)
     
     return final
 
 # ----------------------------------------------------------
-# Detect và tách từng ký tự trong biển số
+# Multi-pass OCR with different preprocessing variants
 # ----------------------------------------------------------
-def detect_characters(preprocessed_img):
+def ocr_plate(img, use_multi_pass=True):
     """
-    Tách từng ký tự từ ảnh đã preprocess bằng contour detection
-    Returns: list of (x, y, w, h, char_img) - sorted từ trái sang phải
+    OCR plate with multi-pass attempts for better accuracy.
+    Returns: (text, confidence, method_used)
     """
-    # Tạo binary image để tìm contours
-    # Thử nhiều cách để có kết quả tốt nhất
-    _, binary1 = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    binary2 = cv2.adaptiveThreshold(
-        preprocessed_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 11, 2
-    )
-    
-    # Dùng binary tốt hơn (thường Otsu tốt hơn)
-    binary = binary1
-    
-    # Morphological operations để nối các phần của ký tự bị tách
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    
-    # Tìm contours
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    char_boxes = []
-    h_img, w_img = preprocessed_img.shape[:2]
-    
-    # Lọc và lưu các bounding box của ký tự
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
+    if not use_multi_pass:
+        # Single pass - simple and fast
+        preprocessed = preprocess_plate(img, variant="standard")
+        results = reader.readtext(
+            preprocessed, 
+            detail=1, 
+            paragraph=False,
+            width_ths=0.7,  # Lower threshold for better character detection
+            height_ths=0.7
+        )
         
-        # Lọc noise: bỏ các box quá nhỏ hoặc quá lớn
-        area = w * h
-        img_area = h_img * w_img
-        min_area = img_area * 0.005  # 0.5% diện tích ảnh (giảm để bắt được ký tự nhỏ)
-        max_area = img_area * 0.25   # 25% diện tích ảnh
+        if not results:
+            return "", 0.0, "single"
         
-        # Lọc theo aspect ratio (ký tự thường có ratio hợp lý)
-        aspect_ratio = h / w if w > 0 else 0
+        # Combine all detected text
+        text_parts = [r[1] for r in results]
+        confidences = [r[2] for r in results]
         
-        # Chiều cao tối thiểu (giảm xuống để bắt được ký tự nhỏ hơn)
-        min_height = h_img * 0.25  # 25% chiều cao ảnh
+        combined_text = "".join(text_parts)
+        avg_conf = np.mean(confidences) if confidences else 0.0
         
-        if (min_area < area < max_area and 
-            0.3 < aspect_ratio < 4.0 and  # Mở rộng range cho aspect ratio
-            h > min_height and
-            w > 3 and h > 3):  # Kích thước tối thiểu tuyệt đối
-            # Thêm padding
-            padding = max(3, min(w, h) // 5)
-            x = max(0, x - padding)
-            y = max(0, y - padding)
-            w = min(w_img - x, w + 2 * padding)
-            h = min(h_img - y, h + 2 * padding)
-            
-            char_img = preprocessed_img[y:y+h, x:x+w]
-            char_boxes.append((x, y, w, h, char_img))
+        return combined_text, avg_conf, "single"
     
-    # Sắp xếp từ trái sang phải (theo x)
-    char_boxes.sort(key=lambda box: box[0])
+    # Multi-pass OCR with different preprocessing variants
+    attempts = []
     
-    return char_boxes
-
-# ----------------------------------------------------------
-# OCR một ký tự đơn lẻ
-# ----------------------------------------------------------
-def ocr_single_char(char_img):
-    """
-    OCR một ký tự đơn lẻ với confidence cao hơn
-    """
-    # Thêm padding trắng xung quanh để EasyOCR đọc tốt hơn
-    h, w = char_img.shape[:2]
-    padding = max(10, min(h, w) // 4)
-    padded = cv2.copyMakeBorder(
-        char_img, padding, padding, padding, padding,
-        cv2.BORDER_CONSTANT, value=255
-    )
-    
-    # OCR với detail để lấy confidence
-    results = reader.readtext(padded, detail=1, paragraph=False)
-    
-    if not results:
-        return "", 0.0
-    
-    # Lấy kết quả có confidence cao nhất
-    best_result = max(results, key=lambda x: x[2])
-    char = best_result[1].strip()
-    conf = best_result[2]
-    
-    return char, conf
-
-# ----------------------------------------------------------
-# OCR toàn bộ biển bằng cách OCR từng ký tự
-# ----------------------------------------------------------
-def ocr_by_characters(preprocessed_img):
-    """
-    OCR biển số bằng cách detect và OCR từng ký tự riêng lẻ
-    Returns: (raw_text, normalized_text, char_details)
-    """
-    char_boxes = detect_characters(preprocessed_img)
-    
-    if not char_boxes:
-        # Nếu không detect được ký tự, fallback về OCR toàn bộ
-        raw = ocr_text(preprocessed_img)
-        return raw, normalize(raw), []
-    
-    chars = []
-    char_details = []
-    
-    for x, y, w, h, char_img in char_boxes:
-        char, conf = ocr_single_char(char_img)
-        if char:
-            chars.append(char)
-            char_details.append({
-                'char': char,
-                'bbox': (x, y, w, h),
-                'conf': conf
-            })
-    
-    raw_text = "".join(chars)
-    normalized_text = normalize(raw_text)
-    
-    return raw_text, normalized_text, char_details
-
-# ----------------------------------------------------------
-# 🔥 OCR bằng EasyOCR (thay Tesseract) - Fallback method
-# ----------------------------------------------------------
-def ocr_text(img):
-    results = reader.readtext(img, detail=0)
-    if not results:
-        return ""
-    return "".join(results)
-
-# ----------------------------------------------------------
-# Normalize plate - Dùng regex để loại bỏ ký tự đặc biệt
-# ----------------------------------------------------------
-def normalize(t):
-    if not t:
-        return ""
-    
-    # Chuyển sang uppercase
-    t = t.upper()
-    
-    # Dùng regex để loại bỏ tất cả ký tự đặc biệt (. - _ space và các ký tự khác)
-    # Chỉ giữ lại chữ cái và số
-    t = re.sub(r"[^A-Z0-9]", "", t)
-    
-    # Thay thế các ký tự dễ nhầm lẫn
-    replacements = {
-        "O": "0",  # O -> 0
-        "I": "1",  # I -> 1
-        "Z": "2",  # Z -> 2
-        "S": "5",  # S -> 5
-        "B": "8",  # B -> 8
+    # EasyOCR parameters for better detection
+    # Lower thresholds = more sensitive to characters (better for small/blurry text)
+    ocr_params = {
+        'detail': 1,
+        'paragraph': False,
+        'width_ths': 0.6,  # Lower = more sensitive to characters
+        'height_ths': 0.6,  # Lower = more sensitive to characters
+        'slope_ths': 0.1,  # Allow slight rotation
+        'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',  # Only allow alphanumeric
     }
     
-    for old, new in replacements.items():
-        t = t.replace(old, new)
+    # Pass 1: Standard preprocessing
+    pre1 = preprocess_plate(img, variant="standard")
+    results1 = reader.readtext(pre1, **ocr_params)
+    if results1:
+        text1 = "".join([r[1] for r in results1])
+        conf1 = np.mean([r[2] for r in results1])
+        attempts.append((text1, conf1, "standard"))
     
-    return t
+    # Pass 2: High contrast variant
+    pre2 = preprocess_plate(img, variant="high_contrast")
+    results2 = reader.readtext(pre2, **ocr_params)
+    if results2:
+        text2 = "".join([r[1] for r in results2])
+        conf2 = np.mean([r[2] for r in results2])
+        attempts.append((text2, conf2, "high_contrast"))
+    
+    # Pass 3: Sharp variant
+    pre3 = preprocess_plate(img, variant="sharp")
+    results3 = reader.readtext(pre3, **ocr_params)
+    if results3:
+        text3 = "".join([r[1] for r in results3])
+        conf3 = np.mean([r[2] for r in results3])
+        attempts.append((text3, conf3, "sharp"))
+    
+    # Pass 4: Clean variant (more denoising)
+    pre4 = preprocess_plate(img, variant="clean")
+    results4 = reader.readtext(pre4, **ocr_params)
+    if results4:
+        text4 = "".join([r[1] for r in results4])
+        conf4 = np.mean([r[2] for r in results4])
+        attempts.append((text4, conf4, "clean"))
+    
+    # Pass 5: Inverted (for dark text on light background)
+    pre5 = preprocess_plate(img, variant="standard")
+    inverted = cv2.bitwise_not(pre5)
+    results5 = reader.readtext(inverted, **ocr_params)
+    if results5:
+        text5 = "".join([r[1] for r in results5])
+        conf5 = np.mean([r[2] for r in results5])
+        attempts.append((text5, conf5, "inverted"))
+    
+    # Pass 6: Very high scale for maximum clarity (especially for G vs 6)
+    h, w = img.shape[:2]
+    scale = 6.0 if min(h, w) < 100 else 5.0  # Very high scale
+    img6 = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    if len(img6.shape) == 3:
+        gray6 = cv2.cvtColor(img6, cv2.COLOR_BGR2GRAY)
+    else:
+        gray6 = img6.copy()
+    
+    # Add padding
+    padding = 30
+    gray6 = cv2.copyMakeBorder(gray6, padding, padding, padding, padding, 
+                               cv2.BORDER_CONSTANT, value=255)
+    
+    # Strong CLAHE for maximum contrast
+    clahe6 = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    enhanced6 = clahe6.apply(gray6)
+    
+    # Strong sharpening to emphasize character details
+    kernel6 = np.array([
+        [0, -1, 0],
+        [-1, 6, -1],
+        [0, -1, 0]
+    ])
+    sharp6 = cv2.filter2D(enhanced6, -1, kernel6)
+    sharp6 = np.clip(sharp6, 0, 255).astype(np.uint8)
+    
+    results6 = reader.readtext(sharp6, **ocr_params)
+    if results6:
+        text6 = "".join([r[1] for r in results6])
+        conf6 = np.mean([r[2] for r in results6])
+        attempts.append((text6, conf6, "ultra_high_scale"))
+    
+    # Pass 7: Adaptive threshold variant
+    h, w = img.shape[:2]
+    scale7 = 4.0 if min(h, w) < 100 else 3.5
+    img7 = cv2.resize(img, None, fx=scale7, fy=scale7, interpolation=cv2.INTER_CUBIC)
+    if len(img7.shape) == 3:
+        gray7 = cv2.cvtColor(img7, cv2.COLOR_BGR2GRAY)
+    else:
+        gray7 = img7.copy()
+    
+    # Add padding
+    padding = 20
+    gray7 = cv2.copyMakeBorder(gray7, padding, padding, padding, padding, 
+                               cv2.BORDER_CONSTANT, value=255)
+    
+    # Adaptive threshold
+    adaptive = cv2.adaptiveThreshold(
+        gray7, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    results7 = reader.readtext(adaptive, **ocr_params)
+    if results7:
+        text7 = "".join([r[1] for r in results7])
+        conf7 = np.mean([r[2] for r in results7])
+        attempts.append((text7, conf7, "adaptive_thresh"))
+    
+    # Pick best result (highest confidence)
+    if not attempts:
+        return "", 0.0, "none"
+    
+    best = max(attempts, key=lambda x: x[1])
+    return best[0], best[1], best[2]
+
+# ----------------------------------------------------------
+# Post-process OCR result based on Vietnamese plate patterns
+# ----------------------------------------------------------
+def post_process_vn_plate(text):
+    """
+    Post-process OCR result using Vietnamese license plate patterns.
+    VN plate format: XXY-XXXXX (e.g., 51G-316.91)
+    - Position 3 (index 2) is typically a LETTER (A-Z)
+    - Other positions are typically NUMBERS (0-9)
+    """
+    if not text or len(text) < 3:
+        return text
+    
+    # Convert to list for easier manipulation
+    chars = list(text.upper())
+    
+    # Fix position 3 (index 2) - should be a letter, not a number
+    # Common mistakes: 6 -> G, 0 -> O, 1 -> I
+    if len(chars) > 2 and chars[2].isdigit():
+        # Common OCR mistakes at position 3 (number misread as letter)
+        fixes = {
+            '6': 'G',  # 6 is often misread as G (most common)
+            '0': 'O',  # 0 is often misread as O
+            '1': 'I',  # 1 is often misread as I
+            '5': 'S',  # 5 is sometimes misread as S
+            '8': 'B',  # 8 is sometimes misread as B
+        }
+        if chars[2] in fixes:
+            chars[2] = fixes[chars[2]]
+    
+    return ''.join(chars)
+
+# ----------------------------------------------------------
+# Normalize Vietnamese license plate
+# ----------------------------------------------------------
+def normalize_plate(text):
+    """
+    Normalize Vietnamese license plate text.
+    Removes special characters and fixes common OCR mistakes.
+    """
+    if not text:
+        return ""
+    
+    # Convert to uppercase
+    text = text.upper()
+    
+    # Remove all special characters using regex (keep only A-Z and 0-9)
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    
+    # Post-process based on VN plate patterns FIRST (before other replacements)
+    # This fixes position 3 (index 2) which should be a letter
+    text = post_process_vn_plate(text)
+    
+    # Common OCR mistakes for Vietnamese plates
+    # Note: G is a valid character in VN plates (e.g., 51G-316.91)
+    # Only replace characters that are clearly mistakes (but NOT at position 3)
+    replacements = {
+        "O": "0",  # Letter O -> Number 0 (common mistake, but not at pos 3)
+        "I": "1",  # Letter I -> Number 1 (common mistake, but not at pos 3)
+        "Z": "2",  # Letter Z -> Number 2 (common mistake)
+        "S": "5",  # Letter S -> Number 5 (common mistake)
+        "B": "8",  # Letter B -> Number 8 (common mistake)
+        # Don't replace G, D as they can be valid in VN plates
+    }
+    
+    # Apply replacements (but preserve position 3 if it's a letter)
+    result = []
+    for i, char in enumerate(text):
+        if i == 2 and char.isalpha():
+            # Position 3: ALWAYS keep as letter (don't replace)
+            result.append(char)
+        elif char in replacements:
+            # Other positions: apply replacement
+            result.append(replacements[char])
+        else:
+            result.append(char)
+    
+    return ''.join(result)
+
+# ----------------------------------------------------------
+# Complete OCR pipeline for plate
+# ----------------------------------------------------------
+def ocr_plate_complete(img, use_multi_pass=True):
+    """
+    Complete OCR pipeline: preprocess -> OCR -> normalize
+    Returns: (raw_text, normalized_text, confidence, method)
+    """
+    raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass)
+    normalized = normalize_plate(raw_text)
+    
+    return raw_text, normalized, confidence, method
