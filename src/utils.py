@@ -53,23 +53,28 @@ def preprocess_plate(img, variant="standard"):
         gray = img.copy()
     
     # 3. Add padding to avoid edge artifacts
-    padding = 20
-    gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, 
+    # More padding at the end (right side) to ensure last characters are not cut off
+    padding_top = 20
+    padding_bottom = 20
+    padding_left = 20
+    padding_right = 40  # Extra padding on right side for last characters
+    gray = cv2.copyMakeBorder(gray, padding_top, padding_bottom, padding_left, padding_right, 
                              cv2.BORDER_CONSTANT, value=255)
     
     # 4. Denoising based on variant
+    # Reduced denoising to preserve thin characters like '1'
     if variant == "clean":
-        # More aggressive denoising
+        # Moderate denoising (reduced from aggressive)
         if min(gray.shape) > 100:
-            gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+            gray = cv2.fastNlMeansDenoising(gray, h=8, templateWindowSize=7, searchWindowSize=21)
         else:
-            gray = cv2.bilateralFilter(gray, 7, 75, 75)
+            gray = cv2.bilateralFilter(gray, 5, 60, 60)
     else:
-        # Gentle denoising
+        # Very gentle denoising to preserve thin characters
         if min(gray.shape) > 100:
-            gray = cv2.fastNlMeansDenoising(gray, h=7, templateWindowSize=7, searchWindowSize=21)
+            gray = cv2.fastNlMeansDenoising(gray, h=5, templateWindowSize=7, searchWindowSize=21)
         else:
-            gray = cv2.bilateralFilter(gray, 5, 50, 50)
+            gray = cv2.bilateralFilter(gray, 3, 40, 40)
     
     # 5. CLAHE for adaptive contrast
     if variant == "high_contrast":
@@ -79,31 +84,44 @@ def preprocess_plate(img, variant="standard"):
     enhanced = clahe.apply(gray)
     
     # 6. Sharpening based on variant
+    # Reduced sharpening to preserve thin characters like '1'
     if variant == "sharp":
-        # Stronger sharpening
-        kernel = np.array([
-            [0, -1, 0],
-            [-1, 5, -1],
-            [0, -1, 0]
-        ])
-    else:
-        # Moderate sharpening
+        # Moderate sharpening (reduced from stronger to preserve details)
         kernel = np.array([
             [0, -0.5, 0],
-            [-0.5, 3.5, -0.5],
+            [-0.5, 4.5, -0.5],
             [0, -0.5, 0]
+        ])
+    else:
+        # Light sharpening to preserve thin characters
+        kernel = np.array([
+            [0, -0.3, 0],
+            [-0.3, 3.2, -0.3],
+            [0, -0.3, 0]
         ])
     sharp = cv2.filter2D(enhanced, -1, kernel)
     
-    # 7. Normalize to [0, 255]
+    # 7. Final contrast enhancement - make text darker and background brighter
+    # This helps EasyOCR distinguish characters more clearly
     final = np.clip(sharp, 0, 255).astype(np.uint8)
+    
+    # Apply threshold to create strong black text on white background
+    # Use Otsu's method to automatically find optimal threshold
+    _, binary = cv2.threshold(final, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Blend: 80% binary (strong contrast) + 20% original (preserve some detail)
+    # This creates very dark text on very bright background
+    final = cv2.addWeighted(binary, 0.8, final, 0.2, 0)
+    
+    # Final normalization
+    final = np.clip(final, 0, 255).astype(np.uint8)
     
     return final
 
 # ----------------------------------------------------------
 # Multi-pass OCR with different preprocessing variants
 # ----------------------------------------------------------
-def ocr_plate(img, use_multi_pass=True):
+def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
     """
     OCR plate with multi-pass attempts for better accuracy.
     Returns: (text, confidence, method_used)
@@ -139,10 +157,20 @@ def ocr_plate(img, use_multi_pass=True):
     ocr_params = {
         'detail': 1,
         'paragraph': False,
-        'width_ths': 0.6,  # Lower = more sensitive to characters
-        'height_ths': 0.6,  # Lower = more sensitive to characters
+        'width_ths': 0.4,  # Lower = more sensitive to characters (was 0.6)
+        'height_ths': 0.4,  # Lower = more sensitive to characters (was 0.6)
         'slope_ths': 0.1,  # Allow slight rotation
         'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',  # Only allow alphanumeric
+    }
+    
+    # More sensitive parameters for detecting small/thin characters
+    ocr_params_sensitive = {
+        'detail': 1,
+        'paragraph': False,
+        'width_ths': 0.3,  # Very sensitive for thin characters like '1'
+        'height_ths': 0.3,  # Very sensitive for small characters
+        'slope_ths': 0.1,
+        'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
     }
     
     # Pass 1: Standard preprocessing
@@ -152,6 +180,13 @@ def ocr_plate(img, use_multi_pass=True):
         text1 = "".join([r[1] for r in results1])
         conf1 = np.mean([r[2] for r in results1])
         attempts.append((text1, conf1, "standard"))
+    
+    # Pass 1b: Standard with sensitive parameters (for thin characters)
+    results1b = reader.readtext(pre1, **ocr_params_sensitive)
+    if results1b:
+        text1b = "".join([r[1] for r in results1b])
+        conf1b = np.mean([r[2] for r in results1b])
+        attempts.append((text1b, conf1b, "standard_sensitive"))
     
     # Pass 2: High contrast variant
     pre2 = preprocess_plate(img, variant="high_contrast")
@@ -178,6 +213,7 @@ def ocr_plate(img, use_multi_pass=True):
         attempts.append((text4, conf4, "clean"))
     
     # Pass 5: Inverted (for dark text on light background)
+    # This often works better for plates with light background
     pre5 = preprocess_plate(img, variant="standard")
     inverted = cv2.bitwise_not(pre5)
     results5 = reader.readtext(inverted, **ocr_params)
@@ -185,6 +221,15 @@ def ocr_plate(img, use_multi_pass=True):
         text5 = "".join([r[1] for r in results5])
         conf5 = np.mean([r[2] for r in results5])
         attempts.append((text5, conf5, "inverted"))
+    
+    # Pass 5b: Inverted with high contrast
+    pre5b = preprocess_plate(img, variant="high_contrast")
+    inverted5b = cv2.bitwise_not(pre5b)
+    results5b = reader.readtext(inverted5b, **ocr_params)
+    if results5b:
+        text5b = "".join([r[1] for r in results5b])
+        conf5b = np.mean([r[2] for r in results5b])
+        attempts.append((text5b, conf5b, "inverted_high_contrast"))
     
     # Pass 6: Very high scale for maximum clarity (especially for G vs 6)
     h, w = img.shape[:2]
@@ -233,10 +278,11 @@ def ocr_plate(img, use_multi_pass=True):
     gray7 = cv2.copyMakeBorder(gray7, padding, padding, padding, padding, 
                                cv2.BORDER_CONSTANT, value=255)
     
-    # Adaptive threshold
+    # Adaptive threshold with better parameters
+    # Use larger block size and constant to avoid over-thresholding
     adaptive = cv2.adaptiveThreshold(
         gray7, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 11, 2
+        cv2.THRESH_BINARY, 15, 5  # Larger block size (15 vs 11), more constant (5 vs 2)
     )
     
     results7 = reader.readtext(adaptive, **ocr_params)
@@ -245,12 +291,60 @@ def ocr_plate(img, use_multi_pass=True):
         conf7 = np.mean([r[2] for r in results7])
         attempts.append((text7, conf7, "adaptive_thresh"))
     
-    # Pick best result (highest confidence)
+    # Pick best result - not just by confidence, but also by pattern validation
     if not attempts:
+        if return_all_attempts:
+            return "", 0.0, "none", []
         return "", 0.0, "none"
     
-    best = max(attempts, key=lambda x: x[1])
-    return best[0], best[1], best[2]
+    # Score each attempt: confidence + pattern validation
+    scored_attempts = []
+    for text, conf, method in attempts:
+        pattern_score = validate_vn_plate_pattern(text)
+        # Combined score: 70% confidence + 30% pattern validation
+        combined_score = conf * 0.7 + pattern_score * 0.3
+        scored_attempts.append((text, conf, method, combined_score, pattern_score))
+    
+    # Sort by combined score (descending)
+    scored_attempts.sort(key=lambda x: x[3], reverse=True)
+    
+    # Get best result
+    best = scored_attempts[0]
+    best_text, best_conf, best_method = best[0], best[1], best[2]
+    
+    if return_all_attempts:
+        # Return all attempts with scores for debugging
+        all_attempts_with_scores = [(t, c, m, cs, ps) for t, c, m, cs, ps in scored_attempts]
+        return best_text, best_conf, best_method, [(t, c, m) for t, c, m, _, _ in scored_attempts]
+    return best_text, best_conf, best_method
+
+# ----------------------------------------------------------
+# Validate Vietnamese plate pattern
+# ----------------------------------------------------------
+def validate_vn_plate_pattern(text):
+    """
+    Validate if text matches Vietnamese plate pattern: XXY-XXXXX
+    - Position 3 (index 2) should be a LETTER
+    - Length should be reasonable (7-9 characters after removing special chars)
+    Returns: score from 0.0 to 1.0
+    """
+    if not text or len(text) < 3:
+        return 0.0
+    
+    # Remove special characters for validation
+    clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
+    
+    if len(clean_text) < 7 or len(clean_text) > 10:
+        return 0.0  # Invalid length
+    
+    # Check if position 3 is a letter (most important)
+    if len(clean_text) > 2:
+        if clean_text[2].isalpha():
+            return 1.0  # Perfect pattern match
+        else:
+            return 0.3  # Position 3 is number (common mistake)
+    
+    return 0.5  # Neutral score
 
 # ----------------------------------------------------------
 # Post-process OCR result based on Vietnamese plate patterns
@@ -258,7 +352,7 @@ def ocr_plate(img, use_multi_pass=True):
 def post_process_vn_plate(text):
     """
     Post-process OCR result using Vietnamese license plate patterns.
-    VN plate format: XXY-XXXXX (e.g., 51G-316.91)
+    VN plate format: XXY-XXXXX (e.g., 51G-316.91, 60A-359.81)
     - Position 3 (index 2) is typically a LETTER (A-Z)
     - Other positions are typically NUMBERS (0-9)
     """
@@ -269,12 +363,13 @@ def post_process_vn_plate(text):
     chars = list(text.upper())
     
     # Fix position 3 (index 2) - should be a letter, not a number
-    # Common mistakes: 6 -> G, 0 -> O, 1 -> I
+    # Common mistakes: 6 -> G, 4 -> A, 0 -> O, 1 -> I
     if len(chars) > 2 and chars[2].isdigit():
         # Common OCR mistakes at position 3 (number misread as letter)
         fixes = {
             '6': 'G',  # 6 is often misread as G (most common)
-            '0': 'O',  # 0 is often misread as O
+            '4': 'A',  # 4 is often misread as A (common in VN plates like 60A)
+            '0': 'A',  # 0 is sometimes misread as A (e.g., 60A -> 600)
             '1': 'I',  # 1 is often misread as I
             '5': 'S',  # 5 is sometimes misread as S
             '8': 'B',  # 8 is sometimes misread as B
@@ -334,12 +429,18 @@ def normalize_plate(text):
 # ----------------------------------------------------------
 # Complete OCR pipeline for plate
 # ----------------------------------------------------------
-def ocr_plate_complete(img, use_multi_pass=True):
+def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False):
     """
     Complete OCR pipeline: preprocess -> OCR -> normalize
     Returns: (raw_text, normalized_text, confidence, method)
+    If return_all_attempts=True, also returns list of all attempts
     """
-    raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass)
-    normalized = normalize_plate(raw_text)
-    
-    return raw_text, normalized, confidence, method
+    if return_all_attempts and use_multi_pass:
+        # Get all attempts for visualization
+        raw_text, confidence, method, all_attempts = ocr_plate(img, use_multi_pass=use_multi_pass, return_all_attempts=True)
+        normalized = normalize_plate(raw_text)
+        return raw_text, normalized, confidence, method, all_attempts
+    else:
+        raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass)
+        normalized = normalize_plate(raw_text)
+        return raw_text, normalized, confidence, method
