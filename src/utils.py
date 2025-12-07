@@ -7,76 +7,183 @@ import easyocr
 reader = easyocr.Reader(['en'])
 
 # ----------------------------------------------------------
-# Detect individual characters using contour detection
+# Remove border/edge contours (plate borders, padding artifacts)
+# ----------------------------------------------------------
+def remove_border_contours(contours, img_shape, border_margin=0.05, debug=False):
+    """
+    Remove contours that are likely plate borders or edge artifacts.
+    
+    Args:
+        contours: List of contours
+        img_shape: (height, width) of image
+        border_margin: Margin from edge to consider as border (default: 5%)
+        debug: Print debug info
+    
+    Returns:
+        Filtered list of contours
+    """
+    h_img, w_img = img_shape
+    border_threshold = min(h_img, w_img) * border_margin
+    
+    filtered = []
+    border_contours = []
+    
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Check if contour touches or is very close to image edges
+        touches_top = y < border_threshold
+        touches_bottom = (y + h) > (h_img - border_threshold)
+        touches_left = x < border_threshold
+        touches_right = (x + w) > (w_img - border_threshold)
+        
+        # Check if contour spans most of the image (likely a border)
+        spans_width = w > w_img * 0.7  # Spans >70% of width
+        spans_height = h > h_img * 0.7  # Spans >70% of height
+        
+        # Check if contour is very large (likely border or merged text)
+        area = w * h
+        img_area = h_img * w_img
+        is_very_large = area > img_area * 0.3  # >30% of image
+        
+        # Exclude if it's a border contour
+        is_border = (
+            (touches_top and touches_bottom) or  # Vertical border
+            (touches_left and touches_right) or  # Horizontal border
+            (spans_width and spans_height) or    # Spans both dimensions
+            (is_very_large and (touches_top or touches_bottom or touches_left or touches_right))  # Large and touches edge
+        )
+        
+        if is_border:
+            border_contours.append(contour)
+            if debug:
+                print(f"    Border contour removed: bbox=({x},{y},{w},{h}), "
+                      f"area={area/img_area*100:.1f}%, touches_edges=({touches_top},{touches_bottom},{touches_left},{touches_right})")
+        else:
+            filtered.append(contour)
+    
+    if debug:
+        print(f"  Removed {len(border_contours)} border/edge contours, kept {len(filtered)}")
+    
+    return filtered
+
+# ----------------------------------------------------------
+# Detect individual characters using contour detection (IMPROVED)
 # ----------------------------------------------------------
 def detect_individual_characters(preprocessed_img, debug=False):
     """
     Detect and separate individual characters using contour detection.
-    Returns: list of (x, y, w, h, char_img) sorted left to right
+    Improved version with border removal, adaptive morphology, and better thresholding.
+    
+    Returns: 
+        tuple: (char_boxes, binary_image)
+        - char_boxes: list of (x, y, w, h, char_img) sorted left to right
+        - binary_image: binary image used for detection (for visualization)
     """
-    # Create binary image - try both normal and inverted
-    # For inverted images (white text on black), we need normal threshold
-    # For normal images (black text on white), we need inverted threshold
+    h_img, w_img = preprocessed_img.shape[:2]
     
     # Check if image is mostly dark (inverted) or mostly light (normal)
     mean_val = np.mean(preprocessed_img)
     is_inverted = mean_val < 127
     
+    # IMPROVED THRESHOLDING: Use adaptive thresholding for more stable results
+    # Adaptive thresholding is less sensitive to background brightness variations
+    block_size = max(11, min(w_img, h_img) // 20)  # Adaptive block size based on image size
+    if block_size % 2 == 0:
+        block_size += 1  # Must be odd
+    
     if is_inverted:
         # Inverted image: white text on black background
-        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Try adaptive threshold first, fallback to Otsu
+        try:
+            binary = cv2.adaptiveThreshold(
+                preprocessed_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, block_size, 2
+            )
+        except:
+            _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     else:
         # Normal image: black text on white background
-        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        try:
+            binary = cv2.adaptiveThreshold(
+                preprocessed_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, block_size, 2
+            )
+        except:
+            _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
-    # Morphological operations to separate characters
-    # Use horizontal kernel to create gaps between characters
-    # Try stronger separation for merged characters
-    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))  # Larger kernel (was 3,1)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal, iterations=2)  # More iterations (was 1)
+    # IMPROVED MORPHOLOGY: Adaptive kernel sizes based on image dimensions
+    # Character width is typically 5-15% of image width
+    char_width_estimate = max(3, int(w_img * 0.08))  # Estimate character width
+    char_height_estimate = max(3, int(h_img * 0.4))  # Estimate character height
     
-    # Additional step: Try vertical erosion to separate vertically connected parts
-    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
+    # Horizontal kernel: slightly smaller than character width to create gaps
+    kernel_h_size = max(3, char_width_estimate // 3)
+    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_h_size, 1))
+    
+    # Vertical kernel: small to separate vertically connected parts
+    kernel_v_size = max(1, char_height_estimate // 10)
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_v_size))
+    
+    # Step 1: Close small gaps within characters (fill holes)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+    
+    # Step 2: Open horizontally to separate characters
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_horizontal, iterations=2)
+    
+    # Step 3: Open vertically to separate vertically connected parts
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_vertical, iterations=1)
+    
+    if debug:
+        print(f"  DEBUG contour: Adaptive morphology - kernel_h={kernel_h_size}x1, kernel_v=1x{kernel_v_size}")
     
     # Find contours
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    char_boxes = []
-    h_img, w_img = preprocessed_img.shape[:2]
-    
     if debug:
-        print(f"  DEBUG contour: Found {len(contours)} contours, img_size={w_img}x{h_img}")
+        print(f"  DEBUG contour: Found {len(contours)} contours before border removal, img_size={w_img}x{h_img}")
+    
+    # REMOVE BORDER CONTOURS FIRST
+    contours = remove_border_contours(contours, (h_img, w_img), border_margin=0.05, debug=debug)
     
     # First pass: collect all valid contours with their bounding boxes
     valid_contours = []
+    img_area = h_img * w_img
+    
     for i, contour in enumerate(contours):
         x, y, w, h = cv2.boundingRect(contour)
-        
-        # Filter by size and aspect ratio
         area = w * h
-        img_area = h_img * w_img
-        min_area = img_area * 0.002  # 0.2% of image
-        max_area = img_area * 0.15    # Reduced from 0.3 to 0.15 (15% max) - exclude large blocks
+        
+        # IMPROVED FILTERING: More robust thresholds
+        min_area = img_area * 0.001  # 0.1% of image (lower threshold for small chars)
+        max_area = img_area * 0.12   # 12% max (exclude large merged blocks)
         
         aspect_ratio = h / w if w > 0 else 0
-        min_height = h_img * 0.15  # Reduced to 15% (allow smaller characters)
-        max_height = h_img * 0.85   # Increased to 85% (allow taller characters, but still filter huge blocks)
+        min_height = h_img * 0.12  # 12% min height
+        max_height = h_img * 0.80   # 80% max height
         
-        if debug and i < 15:  # Debug first 15 contours
+        # Additional checks: exclude very wide or very tall contours (likely merged or noise)
+        width_ratio = w / w_img
+        height_ratio = h / h_img
+        
+        if debug and i < 20:  # Debug first 20 contours
             print(f"    Contour {i}: area={area:.0f} ({area/img_area*100:.2f}%), "
                   f"aspect={aspect_ratio:.2f}, h={h} ({h/h_img*100:.1f}%), "
-                  f"w={w}, h_min={min_height:.0f}, h_max={max_height:.0f}")
+                  f"w={w} ({w/w_img*100:.1f}%), bbox=({x},{y},{w},{h})")
         
-        # Better filtering: exclude very large blocks and very small noise
+        # Better filtering: exclude very large blocks, very small noise, and edge-touching contours
+        touches_edge = (x < 5 or y < 5 or (x + w) > (w_img - 5) or (y + h) > (h_img - 5))
+        
         if (min_area < area < max_area and 
-            0.2 < aspect_ratio < 5.0 and
-            min_height < h < max_height and  # Height must be in reasonable range
-            w > 3 and h > 3):  # Minimum size
+            0.15 < aspect_ratio < 6.0 and  # Wider aspect ratio range
+            min_height < h < max_height and
+            width_ratio < 0.25 and  # Character shouldn't span >25% of width
+            w > 2 and h > 2 and  # Minimum size
+            not (touches_edge and area > img_area * 0.05)):  # Exclude large edge-touching contours
             valid_contours.append((x, y, w, h, area))
     
     # Second pass: remove nested contours (smaller contours inside larger ones)
-    # Sort by area (largest first) to check nesting
     valid_contours.sort(key=lambda c: c[4], reverse=True)
     char_boxes = []
     
@@ -89,24 +196,23 @@ def detect_individual_characters(preprocessed_img, debug=False):
                 continue
             
             # Check if contour 1 is inside contour 2
-            # Allow some margin (10%) for slight misalignment
-            margin = 0.1
+            margin = 0.15  # Increased margin to 15% for better detection
             if (x2 - margin*w2 <= x1 <= x2 + w2 + margin*w2 and
                 y2 - margin*h2 <= y1 <= y2 + h2 + margin*h2 and
                 x2 - margin*w2 <= x1 + w1 <= x2 + w2 + margin*w2 and
                 y2 - margin*h2 <= y1 + h1 <= y2 + h2 + margin*h2):
-                # Check if area overlap is significant (>50% of smaller contour)
+                # Check if area overlap is significant (>40% of smaller contour)
                 overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
                 overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
                 overlap_area = overlap_x * overlap_y
                 
-                if overlap_area > 0.5 * min(area1, area2):
+                if overlap_area > 0.4 * min(area1, area2):
                     is_nested = True
                     break
         
         if not is_nested:
             # Add padding
-            padding = max(2, min(w1, h1) // 6)
+            padding = max(2, min(w1, h1) // 8)  # Reduced padding to avoid merging
             x = max(0, x1 - padding)
             y = max(0, y1 - padding)
             w = min(w_img - x, w1 + 2 * padding)
@@ -121,7 +227,101 @@ def detect_individual_characters(preprocessed_img, debug=False):
     if debug:
         print(f"  DEBUG contour: After filtering: {len(char_boxes)} characters detected")
     
-    return char_boxes
+    return char_boxes, binary  # Return binary image for visualization
+
+# ----------------------------------------------------------
+# Detect characters using vertical projection (alternative method)
+# ----------------------------------------------------------
+def detect_characters_vertical_projection(preprocessed_img, debug=False):
+    """
+    Alternative method: Detect character boundaries using vertical projection.
+    More stable for well-separated characters, less sensitive to morphology issues.
+    
+    Returns:
+        tuple: (char_boxes, binary_image)
+        - char_boxes: list of (x, y, w, h, char_img) sorted left to right
+        - binary_image: binary image used for detection (for visualization)
+    """
+    h_img, w_img = preprocessed_img.shape[:2]
+    
+    # Create binary image
+    mean_val = np.mean(preprocessed_img)
+    is_inverted = mean_val < 127
+    
+    if is_inverted:
+        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        _, binary = cv2.threshold(preprocessed_img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Calculate vertical projection (sum of white pixels in each column)
+    projection = np.sum(binary, axis=0)  # Shape: (width,)
+    
+    # Find character boundaries
+    # Threshold: columns with projection > threshold contain characters
+    threshold = np.max(projection) * 0.1  # 10% of max projection
+    
+    # Find start and end of each character region
+    char_regions = []
+    in_char = False
+    start_x = 0
+    
+    for x in range(w_img):
+        if projection[x] > threshold:
+            if not in_char:
+                start_x = x
+                in_char = True
+        else:
+            if in_char:
+                # End of character region
+                end_x = x
+                char_width = end_x - start_x
+                if char_width > 3:  # Minimum character width
+                    char_regions.append((start_x, end_x))
+                in_char = False
+    
+    # Handle case where last character extends to edge
+    if in_char:
+        char_regions.append((start_x, w_img))
+    
+    # Convert regions to bounding boxes
+    char_boxes = []
+    for start_x, end_x in char_regions:
+        # Extract vertical range (find top and bottom of character)
+        char_slice = binary[:, start_x:end_x]
+        row_projection = np.sum(char_slice, axis=1)
+        
+        # Find top and bottom
+        row_threshold = np.max(row_projection) * 0.1
+        top_y = 0
+        bottom_y = h_img
+        
+        for y in range(h_img):
+            if row_projection[y] > row_threshold:
+                top_y = y
+                break
+        
+        for y in range(h_img - 1, -1, -1):
+            if row_projection[y] > row_threshold:
+                bottom_y = y + 1
+                break
+        
+        w = end_x - start_x
+        h = bottom_y - top_y
+        
+        # Add padding
+        padding = max(2, min(w, h) // 8)
+        x = max(0, start_x - padding)
+        y = max(0, top_y - padding)
+        w = min(w_img - x, w + 2 * padding)
+        h = min(h_img - y, h + 2 * padding)
+        
+        char_img = preprocessed_img[y:y+h, x:x+w]
+        char_boxes.append((x, y, w, h, char_img))
+    
+    if debug:
+        print(f"  DEBUG vertical_projection: Found {len(char_boxes)} characters")
+    
+    return char_boxes, binary
 
 # ----------------------------------------------------------
 # Detect if plate is 2-line or 1-line based on aspect ratio

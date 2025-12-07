@@ -1,5 +1,6 @@
 import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 from ultralytics import YOLO
 
 from utils import (
@@ -8,8 +9,7 @@ from utils import (
     normalize_plate,
     is_two_line_plate,
     split_two_line_plate,
-    validate_vn_plate_pattern,
-    detect_individual_characters
+    reader
 )
 
 # Load YOLO
@@ -78,7 +78,8 @@ def detect_plate(image_path, use_multi_pass=True):
 
 
 if __name__ == "__main__":
-    image_path = r"../data/test/images/car5.jpg"
+    # image_path = r"../data/test/images/car7.jpg"
+    image_path = r"../data/test/images/test_xm4.jpg"
 
     # Use multi-pass OCR for better accuracy
     img, plates = detect_plate(image_path, use_multi_pass=True)
@@ -100,13 +101,15 @@ if __name__ == "__main__":
         )
     print("="*70 + "\n")
 
-    # Visualize results with full pipeline steps
+    # Visualize results - Clean, production-ready visualization with preprocessing steps
     for p in plates:
         crop = p["crop"]
+        raw = p['raw']
+        plate = p['plate']
+        method = p['ocr_method']
         
-        # Get all preprocessing steps
-        import numpy as np
-        from utils import deskew_plate
+        # Get preprocessing steps for visualization
+        from utils import preprocess_plate, deskew_plate
         
         # Step 1: Original
         original = crop.copy()
@@ -150,33 +153,22 @@ if __name__ == "__main__":
         sharpened = cv2.filter2D(clahe_applied, -1, kernel)
         sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
         
-        # Step 9: Final contrast enhancement (make text darker, background brighter)
+        # Step 9: Final contrast enhancement
         _, binary = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         final = cv2.addWeighted(binary, 0.8, sharpened, 0.2, 0)
         final = np.clip(final, 0, 255).astype(np.uint8)
         
-        # Get all OCR attempts if available
-        try:
-            raw, plate, conf, method, all_attempts = ocr_plate_complete(crop, use_multi_pass=True, return_all_attempts=True)
-        except:
-            all_attempts = []
-            raw = p['raw']
-            plate = p['plate']
-            conf = p['ocr_conf']
-            method = p['ocr_method']
-        
-        # IMPORTANT: Get the preprocessed image for the BEST METHOD (not the visualization final)
-        # This ensures BBox detection uses the same image that gave the best OCR result
+        # Get the preprocessed image for the BEST METHOD to visualize OCR blocks
         from utils import preprocess_plate
+        
+        # Handle different preprocessing methods
         if method == "inverted" or method == "inverted_high_contrast":
-            # For inverted methods, we need to invert the preprocessed image
             if method == "inverted_high_contrast":
                 best_preprocessed = preprocess_plate(crop, variant="high_contrast")
             else:
                 best_preprocessed = preprocess_plate(crop, variant="standard")
             best_preprocessed = cv2.bitwise_not(best_preprocessed)
         elif method == "adaptive_thresh":
-            # For adaptive threshold, use special preprocessing
             h, w = crop.shape[:2]
             scale = 4.0 if min(h, w) < 100 else 3.5
             img_scale = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
@@ -192,7 +184,6 @@ if __name__ == "__main__":
                 cv2.THRESH_BINARY, 15, 5
             )
         elif method == "ultra_high_scale":
-            # For ultra high scale
             h, w = crop.shape[:2]
             scale = 6.0 if min(h, w) < 100 else 5.0
             img_scale = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
@@ -224,55 +215,39 @@ if __name__ == "__main__":
             variant = variant_map.get(method, "standard")
             best_preprocessed = preprocess_plate(crop, variant=variant)
         
-        # Get OCR results with bounding boxes using the SAME preprocessed image as best method
-        from utils import reader
-        ocr_params_bbox = {
+        # Get OCR results with bounding boxes using standard OCR parameters
+        ocr_params = {
             'detail': 1,
             'paragraph': False,
-            'width_ths': 0.1,  # Very low to detect individual characters
-            'height_ths': 0.1,  # Very low to detect individual characters
-            'slope_ths': 0.1,
-            'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-        }
-        ocr_results = reader.readtext(best_preprocessed, **ocr_params_bbox)
-        
-        # DEBUG: Also try OCR with the same method that was selected
-        # to see if we get different results
-        print(f"\n=== DEBUG INFO ===")
-        print(f"Best method: {method}")
-        print(f"Raw OCR result: {raw}")
-        print(f"Normalized result: {plate}")
-        print(f"BBox detection (params: width_ths=0.1): {len(ocr_results)} blocks")
-        if ocr_results:
-            bbox_texts = [r[1] for r in ocr_results]
-            print(f"BBox texts: {bbox_texts}")
-            print(f"BBox combined: {''.join(bbox_texts)}")
-        
-        # Try OCR with same params as used in multi-pass
-        ocr_params_main = {
-            'detail': 1,
-            'paragraph': False,
-            'width_ths': 0.4,  # Same as in multi-pass
+            'width_ths': 0.4,  # Standard threshold (same as multi-pass)
             'height_ths': 0.4,
             'slope_ths': 0.1,
             'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
         }
-        ocr_results_main = reader.readtext(final, **ocr_params_main)
-        if ocr_results_main:
-            main_texts = [r[1] for r in ocr_results_main]
-            print(f"Main OCR (params: width_ths=0.4): {len(ocr_results_main)} blocks")
-            print(f"Main texts: {main_texts}")
-            print(f"Main combined: {''.join(main_texts)}")
+        ocr_results = reader.readtext(best_preprocessed, **ocr_params)
         
-        # Check pattern validation
-        from utils import validate_vn_plate_pattern, normalize_plate
-        print(f"\nPattern validation for '{raw}': {validate_vn_plate_pattern(raw)}")
-        print(f"After normalize: {normalize_plate(raw)}")
-        print("=" * 50)
+        # Figure 1: Full image with YOLO detection box
+        fig1, axes1 = plt.subplots(1, 1, figsize=(12, 8))
         
-        # Figure 1: Preprocessing steps (now with 9 steps including deskew)
-        fig1, axes1 = plt.subplots(3, 3, figsize=(15, 12))
-        axes1 = axes1.flatten()
+        # Draw YOLO bounding box on original image
+        img_with_yolo = img.copy()
+        x1, y1, x2, y2 = p['bbox']
+        cv2.rectangle(img_with_yolo, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        
+        # Add label
+        label = f"Plate: {plate} (YOLO: {p['conf']:.2f})"
+        cv2.putText(img_with_yolo, label, (x1, y1 - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        axes1.imshow(cv2.cvtColor(img_with_yolo, cv2.COLOR_BGR2RGB))
+        axes1.set_title("YOLO Plate Detection", fontsize=14, fontweight='bold')
+        axes1.axis("off")
+        plt.tight_layout()
+        plt.show()
+        
+        # Figure 2: Preprocessing Pipeline Steps (9 steps)
+        fig2, axes2 = plt.subplots(3, 3, figsize=(15, 12))
+        axes2 = axes2.flatten()
         
         steps = [
             ("1. Original", original, None),
@@ -286,90 +261,54 @@ if __name__ == "__main__":
             ("9. Contrast Enhanced", final, "gray"),
         ]
         
-        for i, (title, img, cmap) in enumerate(steps):
+        for i, (title, img_step, cmap) in enumerate(steps):
             try:
                 # Convert to RGB if needed (for color images)
-                if cmap is None and len(img.shape) == 3:
-                    if img.shape[2] == 3:
+                if cmap is None and len(img_step.shape) == 3:
+                    if img_step.shape[2] == 3:
                         # BGR to RGB
-                        display_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        display_img = cv2.cvtColor(img_step, cv2.COLOR_BGR2RGB)
                     else:
-                        display_img = img
+                        display_img = img_step
                 else:
-                    display_img = img
+                    display_img = img_step
                 
                 if cmap:
-                    axes1[i].imshow(display_img, cmap=cmap)
+                    axes2[i].imshow(display_img, cmap=cmap)
                 else:
-                    axes1[i].imshow(display_img)
-                axes1[i].set_title(title, fontsize=10)
-                axes1[i].axis("off")
+                    axes2[i].imshow(display_img)
+                axes2[i].set_title(title, fontsize=10, fontweight='bold')
+                axes2[i].axis("off")
             except Exception as e:
                 print(f"Error displaying {title}: {e}")
-                axes1[i].text(0.5, 0.5, f"Error\n{title}", 
+                axes2[i].text(0.5, 0.5, f"Error\n{title}", 
                              ha="center", va="center", fontsize=10)
-                axes1[i].axis("off")
+                axes2[i].axis("off")
         
-        plt.suptitle("Preprocessing Pipeline Steps", fontsize=14, fontweight='bold')
+        plt.suptitle("Preprocessing Pipeline Steps", fontsize=16, fontweight='bold')
         plt.tight_layout()
         plt.show()
         
-        # Detect individual characters using contour detection FIRST
-        individual_chars = detect_individual_characters(best_preprocessed, debug=True)
-        print(f"Contour detection: Found {len(individual_chars)} individual characters")
+        # Figure 3: OCR Results - Clean visualization with EasyOCR blocks only
+        fig3, axes3 = plt.subplots(1, 2, figsize=(14, 6))
         
-        # Figure 3: Contour detection steps (for debugging) - Show BEFORE OCR results
-        fig3, axes3 = plt.subplots(1, 3, figsize=(14, 4))
-        
-        # Show binary image used for contour detection
-        mean_val = np.mean(best_preprocessed)
-        is_inverted = mean_val < 127
-        if is_inverted:
-            _, binary_vis = cv2.threshold(best_preprocessed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        else:
-            _, binary_vis = cv2.threshold(best_preprocessed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
-        binary_sep = cv2.morphologyEx(binary_vis, cv2.MORPH_OPEN, kernel_h, iterations=1)
-        
-        axes3[0].imshow(best_preprocessed, cmap="gray")
-        axes3[0].set_title("Preprocessed Image")
+        # Left: Original crop
+        axes3[0].imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        axes3[0].set_title("Original Plate Crop", fontsize=12, fontweight='bold')
         axes3[0].axis("off")
         
-        axes3[1].imshow(binary_vis, cmap="gray")
-        axes3[1].set_title("Binary (for contours)")
-        axes3[1].axis("off")
+        # Right: Preprocessed image with EasyOCR bounding boxes
+        result_img = best_preprocessed.copy()
+        if len(result_img.shape) == 2:
+            result_img = cv2.cvtColor(result_img, cv2.COLOR_GRAY2RGB)
         
-        axes3[2].imshow(binary_sep, cmap="gray")
-        axes3[2].set_title("After Morph Open\n(to separate chars)")
-        axes3[2].axis("off")
-        
-        plt.suptitle("Contour Detection Steps", fontsize=12)
-        plt.tight_layout()
-        plt.show()
-        
-        # Figure 2: OCR Results with Bounding Boxes
-        fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
-        
-        # Original crop
-        axes2[0].imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-        axes2[0].set_title("Original Crop")
-        axes2[0].axis("off")
-        
-        # Final preprocessed with bounding boxes (use best method's preprocessed image)
-        final_with_boxes = best_preprocessed.copy()
-        if len(final_with_boxes.shape) == 2:
-            final_with_boxes = cv2.cvtColor(final_with_boxes, cv2.COLOR_GRAY2RGB)
-        
-        # Draw EasyOCR bounding boxes (text blocks) - GREEN boxes
-        detected_chars = []
-        total_chars_detected = 0
+        # Draw EasyOCR bounding boxes (text blocks only)
         if ocr_results:
             for i, (bbox, text, conf_score) in enumerate(ocr_results):
                 # bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
                 pts = np.array(bbox, dtype=np.int32)
                 
-                # Determine color based on confidence and text length
+                # Color based on confidence
                 if conf_score > 0.7:
                     color = (0, 255, 0)  # Green - high confidence
                 elif conf_score > 0.5:
@@ -377,88 +316,31 @@ if __name__ == "__main__":
                 else:
                     color = (255, 0, 0)  # Red - low confidence
                 
-                # Draw bounding box (thicker for text blocks)
-                cv2.polylines(final_with_boxes, [pts], True, color, 3)
+                # Draw bounding box
+                cv2.polylines(result_img, [pts], True, color, 3)
                 
                 # Get top-left corner for text label
                 x_coords = [p[0] for p in pts]
                 y_coords = [p[1] for p in pts]
                 x_min, y_min = min(x_coords), min(y_coords)
                 
-                # Count characters in this text block
-                char_count = len(text)
-                total_chars_detected += char_count
-                
-                # Draw text label with more info
-                label = f"Block {i}: '{text}' ({char_count} chars, conf: {conf_score:.2f})"
-                cv2.putText(final_with_boxes, label, (x_min, y_min - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-                
-                detected_chars.append((text, conf_score, bbox, char_count))
+                # Draw text label
+                label = f"'{text}' ({conf_score:.2f})"
+                cv2.putText(result_img, label, (x_min, y_min - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         
-        # Draw individual character bounding boxes (from contour detection) - MAGENTA boxes
-        for i, (x, y, w, h, char_img) in enumerate(individual_chars):
-            # Draw thicker boxes for individual characters (magenta) to make them visible
-            cv2.rectangle(final_with_boxes, (x, y), (x+w, y+h), (255, 0, 255), 2)  # Magenta, thicker
-            cv2.putText(final_with_boxes, f"C{i}", (x, y-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        axes3[1].imshow(result_img)
         
-        # Add warning if only 1 box detected (might be reading as single block)
-        title_text = f"EasyOCR: {len(ocr_results)} block(s), {total_chars_detected} chars"
-        title_text += f" | Contour: {len(individual_chars)} chars"
-        if len(ocr_results) == 1 and total_chars_detected > 1:
-            title_text += "\n⚠️ Single block (EasyOCR grouped chars)"
+        # Title with summary
+        title_text = f"EasyOCR Detection: {len(ocr_results)} text block(s)"
+        if ocr_results:
+            total_chars = sum(len(r[1]) for r in ocr_results)
+            title_text += f", {total_chars} characters"
+        title_text += f"\nRecognized: {plate} | Method: {method}"
         
-        axes2[1].imshow(final_with_boxes)
-        axes2[1].set_title(f"Detection Results\n{title_text}\n(Method: {method})", fontsize=9)
-        axes2[1].axis("off")
+        axes3[1].set_title(title_text, fontsize=11, fontweight='bold')
+        axes3[1].axis("off")
         
-        plt.suptitle("OCR Detection Results", fontsize=12, fontweight='bold')
+        plt.suptitle("OCR Detection Results", fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.show()
-        
-        # Figure 4: Individual characters detected by contour
-        if individual_chars:
-            n_chars = len(individual_chars)
-            cols = min(8, n_chars)
-            rows = (n_chars + cols - 1) // cols
-            
-            fig3, axes3 = plt.subplots(rows, cols, figsize=(cols*1.5, rows*1.5))
-            
-            # Ensure axes3 is always a flat list/array
-            if rows == 1 and cols == 1:
-                axes3 = [axes3]
-            elif rows == 1:
-                axes3 = axes3.flatten() if hasattr(axes3, 'flatten') else list(axes3)
-            elif cols == 1:
-                axes3 = axes3.flatten() if hasattr(axes3, 'flatten') else list(axes3)
-            else:
-                axes3 = axes3.flatten()
-            
-            for i, (x, y, w, h, char_img) in enumerate(individual_chars):
-                if i < len(axes3):
-                    axes3[i].imshow(char_img, cmap="gray")
-                    axes3[i].set_title(f"Char {i}\n({w}x{h})", fontsize=8)
-                    axes3[i].axis("off")
-            
-            # Hide unused subplots
-            for i in range(n_chars, len(axes3)):
-                axes3[i].axis("off")
-            
-            plt.suptitle(f"Individual Characters Detected by Contour ({n_chars} chars)", fontsize=12)
-            plt.tight_layout()
-            plt.show()
-            
-            print(f"\n=== Individual Characters (Contour Detection) ===")
-            print(f"Detected {len(individual_chars)} characters:")
-            for i, (x, y, w, h, _) in enumerate(individual_chars):
-                print(f"  Char {i}: BBox=({x},{y},{w},{h})")
-        else:
-            print(f"\n⚠️  Contour detection found 0 characters!")
-            print(f"   This might be because:")
-            print(f"   1. Characters are too connected (morphological operations didn't separate them)")
-            print(f"   2. Filtering thresholds are too strict")
-            print(f"   3. Preprocessing made characters merge together")
-        
-        # Results summary (printed to console, not displayed in figure)
-        # All OCR attempts are already printed in debug output above

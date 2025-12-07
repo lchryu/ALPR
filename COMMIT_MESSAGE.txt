@@ -1,0 +1,14 @@
+feat: improve OCR pipeline with multi-pass processing and deskew
+
+- Add multi-pass OCR with 7+ preprocessing variants for better accuracy
+- Implement deskew/rotation correction with angle threshold (2.0°)
+- Add support for two-line motorcycle plate detection and splitting
+- Improve preprocessing pipeline with adaptive scaling, CLAHE, and sharpening
+- Add Vietnamese plate pattern validation and post-processing
+- Enhance character detection with border contour removal
+- Optimize OCR parameters for better thin character detection (e.g., '1')
+- Add comprehensive visualization with preprocessing steps in detect_single.py
+- Update utils.py with improved preprocessing and OCR functions
+- Add FastAPI demo endpoint for ALPR service
+- Update README.md with pipeline information
+
