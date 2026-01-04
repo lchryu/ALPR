@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 import numpy as np
@@ -19,7 +20,15 @@ from utils import (
 )
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cho tất cả domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Load YOLO model
 MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 model = YOLO(MODEL_PATH)

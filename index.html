@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>ALPR Demo - Upload ảnh đọc biển số</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-card: #020617;
+      --accent: #22c55e;
+      --accent-soft: rgba(34, 197, 94, 0.15);
+      --border: #1f2937;
+      --text: #e5e7eb;
+      --text-muted: #9ca3af;
+      --danger: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+      background: radial-gradient(circle at top, #1f2937 0, #020617 55%);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 900px;
+      background: linear-gradient(to bottom right, #020617, #020617);
+      border-radius: 18px;
+      padding: 24px 24px 20px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      box-shadow:
+        0 20px 40px rgba(15, 23, 42, 0.9),
+        0 0 0 1px rgba(15, 23, 42, 0.9);
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 16px;
+      gap: 12px;
+    }
+
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .title h1 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(52, 211, 153, 0.5);
+      background: rgba(22, 163, 74, 0.15);
+      color: #bbf7d0;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      gap: 18px;
+      margin-top: 6px;
+    }
+
+    @media (max-width: 840px) {
+      .layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    .card {
+      background: radial-gradient(circle at top left, #020617, #020617);
+      border-radius: 14px;
+      padding: 16px 16px 14px;
+      border: 1px solid rgba(55, 65, 81, 0.8);
+    }
+
+    .card h2 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .card h2 span.icon {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid rgba(34, 197, 94, 0.5);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: #bbf7d0;
+    }
+
+    .small {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+
+    .upload-box {
+      border-radius: 12px;
+      border: 1px dashed rgba(148, 163, 184, 0.7);
+      background: rgba(15, 23, 42, 0.7);
+      padding: 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background-color 0.15s ease,
+        transform 0.08s ease;
+    }
+
+    .upload-box:hover {
+      border-color: rgba(34, 197, 94, 0.8);
+      background: rgba(15, 23, 42, 0.95);
+      transform: translateY(-1px);
+    }
+
+    .upload-box.dragover {
+      border-color: var(--accent);
+      background: rgba(34, 197, 94, 0.08);
+    }
+
+    .upload-title {
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+
+    .upload-subtext {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .upload-subtext span {
+      color: #6ee7b7;
+    }
+
+    .hidden-input {
+      display: none;
+    }
+
+    .btn-row {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.8);
+      background: rgba(15, 23, 42, 0.8);
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 13px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s ease, border-color 0.15s ease,
+        transform 0.08s ease, box-shadow 0.08s ease;
+    }
+
+    .btn:hover {
+      background: rgba(31, 41, 55, 1);
+      transform: translateY(-0.5px);
+    }
+
+    .btn-primary {
+      border-color: rgba(34, 197, 94, 0.7);
+      background: linear-gradient(
+        to right,
+        rgba(34, 197, 94, 0.18),
+        rgba(16, 185, 129, 0.22)
+      );
+      color: #bbf7d0;
+      box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(
+        to right,
+        rgba(34, 197, 94, 0.24),
+        rgba(16, 185, 129, 0.3)
+      );
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn .spinner {
+      width: 13px;
+      height: 13px;
+      border-radius: 999px;
+      border: 2px solid rgba(236, 252, 203, 0.2);
+      border-top-color: #bef264;
+      animation: spin 0.75s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .preview-wrapper {
+      margin-top: 10px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(55, 65, 81, 0.9);
+      background: #020617;
+    }
+
+    .preview-header {
+      padding: 6px 10px;
+      border-bottom: 1px solid rgba(31, 41, 55, 0.9);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .preview-header span {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .preview-header strong {
+      font-weight: 500;
+      font-size: 12px;
+      color: #e5e7eb;
+    }
+
+    .preview-image-container {
+      max-height: 260px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at top, #020617, #020617);
+    }
+
+    .preview-image-container img {
+      max-width: 100%;
+      max-height: 260px;
+      display: block;
+      object-fit: contain;
+    }
+
+    .result-card {
+      border-radius: 12px;
+      border: 1px solid rgba(55, 65, 81, 0.9);
+      background: rgba(15, 23, 42, 0.7);
+      padding: 10px 10px 8px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+
+    .result-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      gap: 5px;
+    }
+
+    .pill-plate {
+      background: var(--accent-soft);
+      color: #bbf7d0;
+      border: 1px solid rgba(34, 197, 94, 0.6);
+      font-weight: 600;
+    }
+
+    .pill-det {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.6);
+      color: #bfdbfe;
+    }
+
+    .pill-ocr {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.6);
+      color: #facc15;
+    }
+
+    .labels {
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .json-box {
+      margin-top: 8px;
+      border-radius: 8px;
+      padding: 8px;
+      background: #020617;
+      border: 1px solid rgba(31, 41, 55, 0.9);
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
+        Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      max-height: 180px;
+      overflow: auto;
+      white-space: pre;
+    }
+
+    .error {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(248, 113, 113, 0.8);
+      background: rgba(127, 29, 29, 0.4);
+      color: #fecaca;
+      font-size: 12px;
+    }
+
+    .hint {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title">
+        <h1>ALPR Demo</h1>
+        <span class="badge">Local API</span>
+      </div>
+      <div class="subtitle">
+        Upload ảnh → gọi <code>/alpr</code> → xem biển số + confidence
+      </div>
+    </div>
+
+    <div class="layout">
+      <!-- Left: Upload & Preview -->
+      <div class="card">
+        <h2>
+          <span class="icon">1</span> Chọn ảnh biển số
+        </h2>
+        <p class="small">
+          Ảnh chụp xe / biển số. API: <code>http://127.0.0.1:8000/alpr</code>
+        </p>
+
+        <label id="uploadBox" class="upload-box">
+          <div class="upload-title">Nhấp để chọn file hoặc kéo thả vào đây</div>
+          <div class="upload-subtext">
+            Hỗ trợ <span>.jpg .jpeg .png</span> – max vài MB thôi cho lành
+          </div>
+          <input
+            id="fileInput"
+            type="file"
+            accept="image/*"
+            class="hidden-input"
+          />
+        </label>
+
+        <div class="btn-row">
+          <button id="clearBtn" class="btn" type="button">
+            Xóa ảnh
+          </button>
+          <button id="sendBtn" class="btn btn-primary" type="button">
+            <div class="spinner" id="spinner" style="display: none"></div>
+            <span id="sendText">Gửi lên API</span>
+          </button>
+        </div>
+
+        <div id="previewWrapper" class="preview-wrapper" style="display: none">
+          <div class="preview-header">
+            <span>Ảnh đã chọn</span>
+            <strong id="previewName"></strong>
+          </div>
+          <div class="preview-image-container">
+            <img id="previewImage" alt="preview" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Result -->
+      <div class="card">
+        <h2>
+          <span class="icon">2</span> Kết quả từ ALPR API
+        </h2>
+        <p class="small">
+          Hiển thị <strong>biển số cuối cùng</strong> + thông tin debug (raw,
+          method, conf…)
+        </p>
+
+        <div id="resultArea" class="result-card" style="display: none"></div>
+
+        <div id="jsonArea" class="json-box" style="display: none"></div>
+
+        <div id="errorBox" class="error" style="display: none"></div>
+
+        <div class="hint">
+          💡 Nếu bị lỗi CORS khi mở HTML bằng trình duyệt, bật CORS trong FastAPI
+          hoặc chạy HTML qua một server tạm (VSCode Live Server, Python
+          <code>http.server</code>, v.v.).
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "http://127.0.0.1:8000/alpr";
+
+    const fileInput = document.getElementById("fileInput");
+    const uploadBox = document.getElementById("uploadBox");
+    const previewWrapper = document.getElementById("previewWrapper");
+    const previewImage = document.getElementById("previewImage");
+    const previewName = document.getElementById("previewName");
+    const sendBtn = document.getElementById("sendBtn");
+    const spinner = document.getElementById("spinner");
+    const sendText = document.getElementById("sendText");
+    const clearBtn = document.getElementById("clearBtn");
+    const resultArea = document.getElementById("resultArea");
+    const jsonArea = document.getElementById("jsonArea");
+    const errorBox = document.getElementById("errorBox");
+
+    let currentFile = null;
+
+    function resetUI() {
+      resultArea.style.display = "none";
+      jsonArea.style.display = "none";
+      errorBox.style.display = "none";
+      errorBox.textContent = "";
+    }
+
+    function setLoading(isLoading) {
+      if (isLoading) {
+        sendBtn.disabled = true;
+        spinner.style.display = "inline-block";
+        sendText.textContent = "Đang gửi...";
+      } else {
+        sendBtn.disabled = false;
+        spinner.style.display = "none";
+        sendText.textContent = "Gửi lên API";
+      }
+    }
+
+    function handleFile(file) {
+      if (!file) return;
+      currentFile = file;
+      resetUI();
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        previewImage.src = e.target.result;
+        previewWrapper.style.display = "block";
+        previewName.textContent = file.name;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    uploadBox.addEventListener("click", () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      handleFile(file);
+    });
+
+    uploadBox.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      uploadBox.classList.add("dragover");
+    });
+
+    uploadBox.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      uploadBox.classList.remove("dragover");
+    });
+
+    uploadBox.addEventListener("drop", (e) => {
+      e.preventDefault();
+      uploadBox.classList.remove("dragover");
+      const file = e.dataTransfer.files[0];
+      handleFile(file);
+    });
+
+    clearBtn.addEventListener("click", () => {
+      currentFile = null;
+      fileInput.value = "";
+      previewWrapper.style.display = "none";
+      resetUI();
+    });
+
+    sendBtn.addEventListener("click", async () => {
+      resetUI();
+
+      if (!currentFile) {
+        errorBox.style.display = "block";
+        errorBox.textContent = "Chưa chọn ảnh nào cả.";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", currentFile);
+
+      try {
+        setLoading(true);
+
+        const res = await fetch(API_URL, {
+          method: "POST",
+          body: formData,
+        });
+
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error("Không parse được JSON từ server:\n" + text);
+        }
+
+        jsonArea.style.display = "block";
+        jsonArea.textContent = JSON.stringify(data, null, 2);
+
+        if (!data.results || data.results.length === 0) {
+          resultArea.style.display = "block";
+          resultArea.innerHTML =
+            "<div>Không tìm thấy biển số nào trong ảnh.</div>";
+          return;
+        }
+
+        const first = data.results[0];
+
+        const plate = first.plate ?? "N/A";
+        const raw = first.raw ?? "N/A";
+        const detConf =
+          typeof first.det_conf === "number"
+            ? first.det_conf.toFixed(2)
+            : "N/A";
+        const ocrConf =
+          typeof first.ocr_conf === "number"
+            ? first.ocr_conf.toFixed(2)
+            : "N/A";
+        const method = first.method ?? "N/A";
+        const twoLine = first.two_line ? "2 dòng" : "1 dòng";
+        const bbox = first.bbox ? JSON.stringify(first.bbox) : "N/A";
+
+        resultArea.style.display = "block";
+        resultArea.innerHTML = `
+          <div class="result-row">
+            <div class="pill pill-plate">
+              <span>Biển số:</span>
+              <span>${plate}</span>
+            </div>
+            <div style="display:flex; gap:4px;">
+              <div class="pill pill-det">YOLO: ${detConf}</div>
+              <div class="pill pill-ocr">OCR: ${ocrConf}</div>
+            </div>
+          </div>
+          <div class="result-row">
+            <div>Raw OCR:</div>
+            <div style="font-family: ui-monospace; color:#e5e7eb;">
+              ${raw}
+            </div>
+          </div>
+          <div class="result-row">
+            <div>Phương pháp:</div>
+            <div style="font-family: ui-monospace; color:#a5b4fc;">
+              ${method}
+            </div>
+          </div>
+          <div class="result-row">
+            <div>Dạng biển:</div>
+            <div>${twoLine}</div>
+          </div>
+          <div class="result-row">
+            <div>BBox YOLO:</div>
+            <div style="font-family: ui-monospace; color:#fde68a;">
+              ${bbox}
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        console.error(err);
+        errorBox.style.display = "block";
+        errorBox.textContent = err.message || "Có lỗi khi gọi API.";
+      } finally {
+        setLoading(false);
+      }
+    });
+  </script>
+</body>
+</html>
