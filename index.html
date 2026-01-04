@@ -365,6 +365,51 @@
       font-size: 11px;
       color: var(--text-muted);
     }
+
+    .debug-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .debug-toggle input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      accent-color: var(--accent);
+    }
+
+    .debug-toggle:has(input:checked) {
+      color: #bbf7d0;
+    }
+
+    .debug-info {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(34, 197, 94, 0.08);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      font-size: 11px;
+      color: #bbf7d0;
+      display: none;
+    }
+
+    .debug-info.active {
+      display: block;
+    }
+
+    .debug-info code {
+      font-family: ui-monospace, monospace;
+      font-size: 10px;
+      color: #6ee7b7;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
   </style>
 </head>
 <body>
@@ -389,7 +434,7 @@
           Ảnh chụp xe / biển số. API: <code>http://127.0.0.1:8000/alpr</code>
         </p>
 
-        <label id="uploadBox" class="upload-box">
+        <div id="uploadBox" class="upload-box">
           <div class="upload-title">Nhấp để chọn file hoặc kéo thả vào đây</div>
           <div class="upload-subtext">
             Hỗ trợ <span>.jpg .jpeg .png</span> – max vài MB thôi cho lành
@@ -400,9 +445,13 @@
             accept="image/*"
             class="hidden-input"
           />
-        </label>
+        </div>
 
         <div class="btn-row">
+          <label class="debug-toggle">
+            <input type="checkbox" id="debugToggle" />
+            <span>Debug Mode</span>
+          </label>
           <button id="clearBtn" class="btn" type="button">
             Xóa ảnh
           </button>
@@ -420,6 +469,10 @@
           <div class="preview-image-container">
             <img id="previewImage" alt="preview" />
           </div>
+        </div>
+
+        <div id="debugInfo" class="debug-info">
+          🔍 <strong>Debug Mode:</strong> Ảnh debug sẽ được lưu vào <code>runs/debug/debug_&lt;timestamp&gt;/</code>
         </div>
       </div>
 
@@ -463,8 +516,21 @@
     const resultArea = document.getElementById("resultArea");
     const jsonArea = document.getElementById("jsonArea");
     const errorBox = document.getElementById("errorBox");
+    const debugToggle = document.getElementById("debugToggle");
+    const debugInfo = document.getElementById("debugInfo");
 
     let currentFile = null;
+
+    // Debug toggle handler
+    debugToggle.addEventListener("change", (e) => {
+      const isChecked = e.target.checked;
+      console.log(`[Debug] Toggle changed: ${isChecked}`);
+      if (isChecked) {
+        debugInfo.classList.add("active");
+      } else {
+        debugInfo.classList.remove("active");
+      }
+    });
 
     function resetUI() {
       resultArea.style.display = "none";
@@ -547,7 +613,16 @@
       try {
         setLoading(true);
 
-        const res = await fetch(API_URL, {
+        // Build API URL with debug parameter if enabled
+        const debugEnabled = debugToggle.checked;
+        const apiUrl = debugEnabled 
+          ? `${API_URL}?debug=true`
+          : API_URL;
+
+        console.log(`[Debug] Debug mode: ${debugEnabled}`);
+        console.log(`[Debug] API URL: ${apiUrl}`);
+
+        const res = await fetch(apiUrl, {
           method: "POST",
           body: formData,
         });
@@ -586,6 +661,19 @@
         const twoLine = first.two_line ? "2 dòng" : "1 dòng";
         const bbox = first.bbox ? JSON.stringify(first.bbox) : "N/A";
 
+        // Show debug info if debug mode was enabled
+        let debugStatusHtml = "";
+        if (debugEnabled) {
+          debugStatusHtml = `
+          <div class="result-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(55, 65, 81, 0.5);">
+            <div style="color: #6ee7b7; font-size: 11px;">🔍 Debug Mode:</div>
+            <div style="font-size: 11px; color: #bbf7d0;">
+              Ảnh đã được lưu vào <code style="background: rgba(0,0,0,0.3); padding: 2px 4px; border-radius: 3px;">runs/debug/debug_&lt;timestamp&gt;/</code>
+            </div>
+          </div>
+          `;
+        }
+
         resultArea.style.display = "block";
         resultArea.innerHTML = `
           <div class="result-row">
@@ -620,6 +708,7 @@
               ${bbox}
             </div>
           </div>
+          ${debugStatusHtml}
         `;
       } catch (err) {
         console.error(err);

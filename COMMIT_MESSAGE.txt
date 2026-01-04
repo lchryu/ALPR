@@ -1,14 +1,12 @@
-feat: improve OCR pipeline with multi-pass processing and deskew
+feat: add debug image logging system and fix UI bugs
 
-- Add multi-pass OCR with 7+ preprocessing variants for better accuracy
-- Implement deskew/rotation correction with angle threshold (2.0°)
-- Add support for two-line motorcycle plate detection and splitting
-- Improve preprocessing pipeline with adaptive scaling, CLAHE, and sharpening
-- Add Vietnamese plate pattern validation and post-processing
-- Enhance character detection with border contour removal
-- Optimize OCR parameters for better thin character detection (e.g., '1')
-- Add comprehensive visualization with preprocessing steps in detect_single.py
-- Update utils.py with improved preprocessing and OCR functions
-- Add FastAPI demo endpoint for ALPR service
-- Update README.md with pipeline information
+- Add DebugImageLogger for optional image logging (instrumentation only)
+- Add debug mode toggle to API endpoint (?debug=true)
+- Add debug mode toggle to frontend UI
+- Fix double-click bug in file input (change label to div)
+- Refactor OCR pipeline to 3-pass waterfall (clean/robust/fallback)
+- Add visualization tool (visualize_pipeline.py) for debugging
+- Update utils.py with logger parameter support (zero side effects when disabled)
 
+Debug images are saved to runs/debug/debug_<timestamp>/ when enabled.
+All changes are backward compatible - default behavior unchanged.

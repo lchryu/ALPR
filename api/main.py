@@ -1,5 +1,5 @@
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
@@ -19,6 +19,13 @@ from utils import (
     normalize_plate
 )
 
+# Import debug logger (optional instrumentation)
+try:
+    from debug_logger import DebugImageLogger
+except ImportError as e:
+    print(f"Warning: Could not import DebugImageLogger: {e}")
+    DebugImageLogger = None
+
 app = FastAPI()
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -35,7 +42,21 @@ model = YOLO(MODEL_PATH)
 
 
 @app.post("/alpr")
-async def alpr_api(file: UploadFile = File(...)):
+async def alpr_api(
+    file: UploadFile = File(...),
+    debug: bool = Query(False, description="Enable debug image logging")
+):
+    """
+    ALPR API endpoint.
+    
+    Args:
+        file: Uploaded image file
+        debug: If True, enable image logging for debugging (default: False)
+              Usage: POST /alpr?debug=true
+    
+    Returns:
+        JSON response with detection results
+    """
     # Read uploaded file
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
@@ -43,6 +64,18 @@ async def alpr_api(file: UploadFile = File(...)):
 
     if img is None:
         return JSONResponse({"error": "Invalid image"}, status_code=400)
+
+    # Create debug logger if enabled (instrumentation only)
+    logger = None
+    if debug:
+        if DebugImageLogger is None:
+            print("Warning: DebugImageLogger not available, debug mode disabled")
+        else:
+            # Use absolute path from BASE_DIR
+            debug_dir = os.path.join(BASE_DIR, "runs", "debug")
+            logger = DebugImageLogger(enabled=True, root_dir=debug_dir)
+            logger.save("input", img)
+            print(f"Debug mode enabled. Images will be saved to: {logger.output_dir}")
 
     # YOLO detect
     results = model(img)[0]
@@ -56,6 +89,10 @@ async def alpr_api(file: UploadFile = File(...)):
 
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
         crop = img[y1:y2, x1:x2]
+        
+        # Instrumentation: log cropped plate
+        if logger:
+            logger.save("crop", crop)
 
         is_two = is_two_line_plate(crop)
 
@@ -63,8 +100,8 @@ async def alpr_api(file: UploadFile = File(...)):
             # Split into 2
             top, bottom = split_two_line_plate(crop)
 
-            top_raw, top_norm, top_conf, top_method = ocr_plate_complete(top)
-            bot_raw, bot_norm, bot_conf, bot_method = ocr_plate_complete(bottom)
+            top_raw, top_norm, top_conf, top_method = ocr_plate_complete(top, logger=logger)
+            bot_raw, bot_norm, bot_conf, bot_method = ocr_plate_complete(bottom, logger=logger)
 
             raw = top_raw + bot_raw
             plate = normalize_plate(raw)
@@ -73,7 +110,7 @@ async def alpr_api(file: UploadFile = File(...)):
             method = f"{top_method}+{bot_method}"
 
         else:
-            raw, plate, ocr_conf, method = ocr_plate_complete(crop)
+            raw, plate, ocr_conf, method = ocr_plate_complete(crop, logger=logger)
 
         output.append({
             "bbox": [int(x1), int(y1), int(x2), int(y2)],
@@ -91,3 +128,12 @@ async def alpr_api(file: UploadFile = File(...)):
 @app.get("/")
 def root():
     return {"message": "ALPR FastAPI is running!"}
+
+
+@app.get("/debug/status")
+def debug_status():
+    """Check if debug logger is available"""
+    return {
+        "debug_logger_available": DebugImageLogger is not None,
+        "debug_dir": os.path.join(BASE_DIR, "runs", "debug") if DebugImageLogger else None
+    }

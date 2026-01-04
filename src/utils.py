@@ -342,7 +342,7 @@ def split_two_line_plate(crop):
 # ----------------------------------------------------------
 # Deskew / Rotation Correction
 # ----------------------------------------------------------
-def deskew_plate(img, angle_threshold=2.0, debug=False):
+def deskew_plate(img, angle_threshold=2.0, debug=False, logger=None):
     """
     Detect and correct rotation/skew in license plate image.
     Only applies correction if angle exceeds threshold (to avoid affecting horizontal plates).
@@ -351,6 +351,7 @@ def deskew_plate(img, angle_threshold=2.0, debug=False):
         img: Input image (BGR or grayscale)
         angle_threshold: Minimum angle (degrees) to trigger correction (default: 2.0)
         debug: If True, print detected angle (default: False)
+        logger: Optional DebugImageLogger for instrumentation (default: None)
     
     Returns:
         Corrected image (same format as input)
@@ -466,12 +467,16 @@ def deskew_plate(img, angle_threshold=2.0, debug=False):
                                    borderMode=cv2.BORDER_CONSTANT, 
                                    borderValue=255)
     
+    # Instrumentation: log deskewed image
+    if logger:
+        logger.save("deskew", corrected)
+    
     return corrected
 
 # ----------------------------------------------------------
 # Preprocess plate - Optimized for EasyOCR
 # ----------------------------------------------------------
-def preprocess_plate(img, variant="standard", apply_deskew=True):
+def preprocess_plate(img, variant="standard", apply_deskew=True, logger=None):
     """
     Clean preprocessing pipeline optimized for EasyOCR.
     Focuses on clarity without destroying texture.
@@ -480,10 +485,11 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
         img: Input image (BGR or grayscale)
         variant: "standard", "high_contrast", "sharp", "clean"
         apply_deskew: Whether to apply rotation correction (default: True)
+        logger: Optional DebugImageLogger for instrumentation (default: None)
     """
     # 0. Deskew/rotation correction (applied first, before upscaling)
     if apply_deskew:
-        img = deskew_plate(img, angle_threshold=2.0, debug=True)
+        img = deskew_plate(img, angle_threshold=2.0, debug=True, logger=logger)
     
     h, w = img.shape[:2]
     
@@ -502,6 +508,10 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         gray = img.copy()
+    
+    # Instrumentation: log grayscale
+    if logger:
+        logger.save("gray", gray)
     
     # 3. Add padding to avoid edge artifacts
     # More padding at the end (right side) to ensure last characters are not cut off
@@ -534,6 +544,10 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
     
+    # Instrumentation: log contrast enhanced
+    if logger:
+        logger.save("contrast", enhanced)
+    
     # 6. Sharpening based on variant
     # Reduced sharpening to preserve thin characters like '1'
     if variant == "sharp":
@@ -560,6 +574,10 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
     # Use Otsu's method to automatically find optimal threshold
     _, binary = cv2.threshold(final, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
+    # Instrumentation: log threshold
+    if logger:
+        logger.save("threshold", binary)
+    
     # IMPORTANT: Add spacing between characters to help EasyOCR detect them separately
     # Use morphological opening with horizontal kernel to separate characters
     # This creates small gaps between characters without breaking them
@@ -577,22 +595,30 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
     # Final normalization
     final = np.clip(final, 0, 255).astype(np.uint8)
     
+    # Instrumentation: log final preprocessed image
+    if logger:
+        logger.save("preprocessed_final", final)
+    
     return final
 
 # ----------------------------------------------------------
 # 3-PASS WATERFALL OCR PIPELINE
 # ----------------------------------------------------------
 
-def _ocr_pass_1_clean(img):
+def _ocr_pass_1_clean(img, logger=None):
     """
     PASS 1 - CLEAN PASS
     Minimal preprocessing for clear, straight plates with good lighting.
     Goal: Fast, high-precision for easy cases.
     
+    Args:
+        img: Input cropped plate image
+        logger: Optional DebugImageLogger for instrumentation (default: None)
+    
     Returns: (text, confidence) or (None, 0.0) if no result
     """
     # Light preprocessing: deskew + minimal enhancement
-    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False, logger=logger)
     h, w = img_deskewed.shape[:2]
     
     # Moderate upscale
@@ -617,6 +643,10 @@ def _ocr_pass_1_clean(img):
     # Mild threshold
     _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
+    # Instrumentation: log OCR input image
+    if logger:
+        logger.save("pass1_input", binary)
+    
     # OCR with standard parameters (optimized for single-line text)
     ocr_params = {
         'detail': 1,
@@ -637,16 +667,20 @@ def _ocr_pass_1_clean(img):
     return text, confidence
 
 
-def _ocr_pass_2_robust(img):
+def _ocr_pass_2_robust(img, logger=None):
     """
     PASS 2 - ROBUST PASS
     Stronger preprocessing for slight blur, rotation, or uneven lighting.
     Goal: High recall for moderately difficult cases.
     
+    Args:
+        img: Input cropped plate image
+        logger: Optional DebugImageLogger for instrumentation (default: None)
+    
     Returns: (text, confidence) or (None, 0.0) if no result
     """
     # Apply deskew
-    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False, logger=logger)
     h, w = img_deskewed.shape[:2]
     
     # Higher upscale for better clarity
@@ -689,6 +723,10 @@ def _ocr_pass_2_robust(img):
         cv2.THRESH_BINARY, 15, 5
     )
     
+    # Instrumentation: log OCR input image
+    if logger:
+        logger.save("pass2_input", adaptive)
+    
     # OCR with more sensitive parameters
     ocr_params = {
         'detail': 1,
@@ -709,17 +747,21 @@ def _ocr_pass_2_robust(img):
     return text, confidence
 
 
-def _ocr_pass_3_fallback(img):
+def _ocr_pass_3_fallback(img, logger=None):
     """
     PASS 3 - FALLBACK PASS
     Aggressive preprocessing for very hard cases.
     May produce noisy results - MUST go through normalization + pattern correction.
     Goal: Salvage attempt for difficult images.
     
+    Args:
+        img: Input cropped plate image
+        logger: Optional DebugImageLogger for instrumentation (default: None)
+    
     Returns: (text, confidence) or (None, 0.0) if no result
     """
     # Apply deskew
-    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False, logger=logger)
     h, w = img_deskewed.shape[:2]
     
     # Very high upscale
@@ -772,9 +814,19 @@ def _ocr_pass_3_fallback(img):
     
     # Try normal first
     results = reader.readtext(binary, **ocr_params)
+    
+    # Instrumentation: log OCR input image (normal)
+    if logger:
+        logger.save("pass3_input", binary)
+    
     if not results:
         # Try inverted
         inverted = cv2.bitwise_not(binary)
+        
+        # Instrumentation: log inverted image
+        if logger:
+            logger.save("pass3_input_inverted", inverted)
+        
         results = reader.readtext(inverted, **ocr_params)
     
     if not results:
@@ -809,7 +861,7 @@ def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7
     return True
 
 
-def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
+def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None):
     """
     3-PASS WATERFALL OCR PIPELINE
     
@@ -822,13 +874,14 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
         img: Input cropped license plate image
         use_multi_pass: If False, only run Pass 1
         return_all_attempts: If True, return all attempts (for debugging)
+        logger: Optional DebugImageLogger for instrumentation (default: None)
     
     Returns:
         (text, confidence, method_used) or (text, confidence, method, all_attempts) if return_all_attempts=True
     """
     if not use_multi_pass:
         # Single pass mode - only Pass 1
-        text, confidence = _ocr_pass_1_clean(img)
+        text, confidence = _ocr_pass_1_clean(img, logger=logger)
         if text:
             return text, confidence, "pass1_clean"
         return "", 0.0, "pass1_clean"
@@ -837,7 +890,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
     all_attempts = []
     
     # PASS 1: Clean pass
-    text, confidence = _ocr_pass_1_clean(img)
+    text, confidence = _ocr_pass_1_clean(img, logger=logger)
     if text:
         normalized = normalize_plate(text)
         all_attempts.append((text, confidence, "pass1_clean"))
@@ -849,7 +902,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
             return text, confidence, "pass1_clean"
     
     # PASS 2: Robust pass
-    text, confidence = _ocr_pass_2_robust(img)
+    text, confidence = _ocr_pass_2_robust(img, logger=logger)
     if text:
         normalized = normalize_plate(text)
         all_attempts.append((text, confidence, "pass2_robust"))
@@ -861,7 +914,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
             return text, confidence, "pass2_robust"
     
     # PASS 3: Fallback pass (always return result, even if not perfect)
-    text, confidence = _ocr_pass_3_fallback(img)
+    text, confidence = _ocr_pass_3_fallback(img, logger=logger)
     if text:
         all_attempts.append((text, confidence, "pass3_fallback"))
         
@@ -985,18 +1038,24 @@ def normalize_plate(text):
 # ----------------------------------------------------------
 # Complete OCR pipeline for plate
 # ----------------------------------------------------------
-def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False):
+def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False, logger=None):
     """
     Complete OCR pipeline: preprocess -> OCR -> normalize
     Returns: (raw_text, normalized_text, confidence, method)
     If return_all_attempts=True, also returns list of all attempts
+    
+    Args:
+        img: Input cropped plate image
+        use_multi_pass: If False, only run Pass 1
+        return_all_attempts: If True, return all attempts (for debugging)
+        logger: Optional DebugImageLogger for instrumentation (default: None)
     """
     if return_all_attempts and use_multi_pass:
         # Get all attempts for visualization
-        raw_text, confidence, method, all_attempts = ocr_plate(img, use_multi_pass=use_multi_pass, return_all_attempts=True)
+        raw_text, confidence, method, all_attempts = ocr_plate(img, use_multi_pass=use_multi_pass, return_all_attempts=True, logger=logger)
         normalized = normalize_plate(raw_text)
         return raw_text, normalized, confidence, method, all_attempts
     else:
-        raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass)
+        raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass, logger=logger)
         normalized = normalize_plate(raw_text)
         return raw_text, normalized, confidence, method
