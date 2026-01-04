@@ -1,0 +1,3 @@
+Raw: JC1J100TL
+Confidence: 0.470
+Method: pass3_fallback

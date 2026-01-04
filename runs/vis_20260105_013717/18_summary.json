@@ -1,0 +1,10 @@
+{
+  "det_conf": 0.7819339632987976,
+  "pass_used": "pass3_fallback+pass3_fallback",
+  "raw_text": "JC1J100TLIJI0J081",
+  "normalized_plate": "JCIJ100TL1J10J081",
+  "pattern_ok": false,
+  "ocr_conf": 0.29308825735116634,
+  "method": "pass3_fallback+pass3_fallback",
+  "two_line": false
+}

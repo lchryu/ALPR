@@ -580,223 +580,299 @@ def preprocess_plate(img, variant="standard", apply_deskew=True):
     return final
 
 # ----------------------------------------------------------
-# Multi-pass OCR with different preprocessing variants
+# 3-PASS WATERFALL OCR PIPELINE
 # ----------------------------------------------------------
-def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
+
+def _ocr_pass_1_clean(img):
     """
-    OCR plate with multi-pass attempts for better accuracy.
-    Returns: (text, confidence, method_used)
+    PASS 1 - CLEAN PASS
+    Minimal preprocessing for clear, straight plates with good lighting.
+    Goal: Fast, high-precision for easy cases.
+    
+    Returns: (text, confidence) or (None, 0.0) if no result
     """
-    if not use_multi_pass:
-        # Single pass - simple and fast
-        # Deskew first, then preprocess
-        img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=True)
-        preprocessed = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
-        results = reader.readtext(
-            preprocessed, 
-            detail=1, 
-            paragraph=False,
-            width_ths=0.7,  # Lower threshold for better character detection
-            height_ths=0.7
-        )
-        
-        if not results:
-            return "", 0.0, "single"
-        
-        # Combine all detected text
-        text_parts = [r[1] for r in results]
-        confidences = [r[2] for r in results]
-        
-        combined_text = "".join(text_parts)
-        avg_conf = np.mean(confidences) if confidences else 0.0
-        
-        return combined_text, avg_conf, "single"
+    # Light preprocessing: deskew + minimal enhancement
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
+    h, w = img_deskewed.shape[:2]
     
-    # Multi-pass OCR with different preprocessing variants
-    attempts = []
+    # Moderate upscale
+    scale = 3.5 if min(h, w) < 100 else 3.0
+    img_scaled = cv2.resize(img_deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    # EasyOCR parameters for better detection
-    # Lower thresholds = more sensitive to characters (better for small/blurry text)
+    # Convert to grayscale
+    if len(img_scaled.shape) == 3:
+        gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_scaled.copy()
+    
+    # Light padding
+    padding = 15
+    gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, 
+                              cv2.BORDER_CONSTANT, value=255)
+    
+    # Light CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Mild threshold
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # OCR with standard parameters (optimized for single-line text)
     ocr_params = {
         'detail': 1,
         'paragraph': False,
-        'width_ths': 0.4,  # Lower = more sensitive to characters (was 0.6)
-        'height_ths': 0.4,  # Lower = more sensitive to characters (was 0.6)
-        'slope_ths': 0.1,  # Allow slight rotation
-        'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',  # Only allow alphanumeric
-    }
-    
-    # More sensitive parameters for detecting small/thin characters
-    ocr_params_sensitive = {
-        'detail': 1,
-        'paragraph': False,
-        'width_ths': 0.3,  # Very sensitive for thin characters like '1'
-        'height_ths': 0.3,  # Very sensitive for small characters
+        'width_ths': 0.6,  # Standard threshold
+        'height_ths': 0.6,
         'slope_ths': 0.1,
         'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
     }
     
-    # Deskew ONCE before all preprocessing variants (to avoid redundant processing)
-    # This ensures rotation correction is applied only once, not 12+ times
-    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=True)
+    results = reader.readtext(binary, **ocr_params)
+    if not results:
+        return None, 0.0
     
-    # Pass 1: Standard preprocessing (deskew already applied, skip it in preprocess_plate)
-    pre1 = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
-    results1 = reader.readtext(pre1, **ocr_params)
-    if results1:
-        text1 = "".join([r[1] for r in results1])
-        conf1 = np.mean([r[2] for r in results1])
-        attempts.append((text1, conf1, "standard"))
+    text = "".join([r[1] for r in results])
+    confidence = np.mean([r[2] for r in results])
     
-    # Pass 1b: Standard with sensitive parameters (for thin characters)
-    results1b = reader.readtext(pre1, **ocr_params_sensitive)
-    if results1b:
-        text1b = "".join([r[1] for r in results1b])
-        conf1b = np.mean([r[2] for r in results1b])
-        attempts.append((text1b, conf1b, "standard_sensitive"))
+    return text, confidence
+
+
+def _ocr_pass_2_robust(img):
+    """
+    PASS 2 - ROBUST PASS
+    Stronger preprocessing for slight blur, rotation, or uneven lighting.
+    Goal: High recall for moderately difficult cases.
     
-    # Pass 2: High contrast variant (deskew already applied)
-    pre2 = preprocess_plate(img_deskewed, variant="high_contrast", apply_deskew=False)
-    results2 = reader.readtext(pre2, **ocr_params)
-    if results2:
-        text2 = "".join([r[1] for r in results2])
-        conf2 = np.mean([r[2] for r in results2])
-        attempts.append((text2, conf2, "high_contrast"))
-    
-    # Pass 3: Sharp variant (deskew already applied)
-    pre3 = preprocess_plate(img_deskewed, variant="sharp", apply_deskew=False)
-    results3 = reader.readtext(pre3, **ocr_params)
-    if results3:
-        text3 = "".join([r[1] for r in results3])
-        conf3 = np.mean([r[2] for r in results3])
-        attempts.append((text3, conf3, "sharp"))
-    
-    # Pass 4: Clean variant (more denoising, deskew already applied)
-    pre4 = preprocess_plate(img_deskewed, variant="clean", apply_deskew=False)
-    results4 = reader.readtext(pre4, **ocr_params)
-    if results4:
-        text4 = "".join([r[1] for r in results4])
-        conf4 = np.mean([r[2] for r in results4])
-        attempts.append((text4, conf4, "clean"))
-    
-    # Pass 5: Inverted (for dark text on light background)
-    # This often works better for plates with light background
-    pre5 = preprocess_plate(img_deskewed, variant="standard", apply_deskew=False)
-    inverted = cv2.bitwise_not(pre5)
-    results5 = reader.readtext(inverted, **ocr_params)
-    if results5:
-        text5 = "".join([r[1] for r in results5])
-        conf5 = np.mean([r[2] for r in results5])
-        attempts.append((text5, conf5, "inverted"))
-    
-    # Pass 5b: Inverted with high contrast
-    pre5b = preprocess_plate(img_deskewed, variant="high_contrast", apply_deskew=False)
-    inverted5b = cv2.bitwise_not(pre5b)
-    results5b = reader.readtext(inverted5b, **ocr_params)
-    if results5b:
-        text5b = "".join([r[1] for r in results5b])
-        conf5b = np.mean([r[2] for r in results5b])
-        attempts.append((text5b, conf5b, "inverted_high_contrast"))
-    
-    # Pass 6: Very high scale for maximum clarity (especially for G vs 6)
+    Returns: (text, confidence) or (None, 0.0) if no result
+    """
+    # Apply deskew
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
     h, w = img_deskewed.shape[:2]
-    scale = 6.0 if min(h, w) < 100 else 5.0  # Very high scale
-    img6 = cv2.resize(img_deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
-    if len(img6.shape) == 3:
-        gray6 = cv2.cvtColor(img6, cv2.COLOR_BGR2GRAY)
+    
+    # Higher upscale for better clarity
+    scale = 4.5 if min(h, w) < 100 else 4.0
+    img_scaled = cv2.resize(img_deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    
+    # Convert to grayscale
+    if len(img_scaled.shape) == 3:
+        gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
     else:
-        gray6 = img6.copy()
+        gray = img_scaled.copy()
     
     # Add padding
+    padding = 20
+    gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, 
+                              cv2.BORDER_CONSTANT, value=255)
+    
+    # Denoising
+    if min(gray.shape) > 100:
+        gray = cv2.fastNlMeansDenoising(gray, h=5, templateWindowSize=7, searchWindowSize=21)
+    else:
+        gray = cv2.bilateralFilter(gray, 3, 40, 40)
+    
+    # Stronger CLAHE
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Light sharpening
+    kernel = np.array([
+        [0, -0.3, 0],
+        [-0.3, 3.2, -0.3],
+        [0, -0.3, 0]
+    ])
+    sharp = cv2.filter2D(enhanced, -1, kernel)
+    sharp = np.clip(sharp, 0, 255).astype(np.uint8)
+    
+    # Adaptive threshold (more robust to lighting variations)
+    adaptive = cv2.adaptiveThreshold(
+        sharp, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 15, 5
+    )
+    
+    # OCR with more sensitive parameters
+    ocr_params = {
+        'detail': 1,
+        'paragraph': False,
+        'width_ths': 0.4,  # More sensitive
+        'height_ths': 0.4,
+        'slope_ths': 0.1,
+        'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    }
+    
+    results = reader.readtext(adaptive, **ocr_params)
+    if not results:
+        return None, 0.0
+    
+    text = "".join([r[1] for r in results])
+    confidence = np.mean([r[2] for r in results])
+    
+    return text, confidence
+
+
+def _ocr_pass_3_fallback(img):
+    """
+    PASS 3 - FALLBACK PASS
+    Aggressive preprocessing for very hard cases.
+    May produce noisy results - MUST go through normalization + pattern correction.
+    Goal: Salvage attempt for difficult images.
+    
+    Returns: (text, confidence) or (None, 0.0) if no result
+    """
+    # Apply deskew
+    img_deskewed = deskew_plate(img, angle_threshold=2.0, debug=False)
+    h, w = img_deskewed.shape[:2]
+    
+    # Very high upscale
+    scale = 6.0 if min(h, w) < 100 else 5.0
+    img_scaled = cv2.resize(img_deskewed, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    
+    # Convert to grayscale
+    if len(img_scaled.shape) == 3:
+        gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_scaled.copy()
+    
+    # Extra padding
     padding = 30
-    gray6 = cv2.copyMakeBorder(gray6, padding, padding, padding, padding, 
-                               cv2.BORDER_CONSTANT, value=255)
+    gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, 
+                              cv2.BORDER_CONSTANT, value=255)
     
-    # Strong CLAHE for maximum contrast
-    clahe6 = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    enhanced6 = clahe6.apply(gray6)
+    # Strong denoising
+    if min(gray.shape) > 100:
+        gray = cv2.fastNlMeansDenoising(gray, h=8, templateWindowSize=7, searchWindowSize=21)
+    else:
+        gray = cv2.bilateralFilter(gray, 5, 60, 60)
     
-    # Strong sharpening to emphasize character details
-    kernel6 = np.array([
+    # Maximum CLAHE
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Strong sharpening
+    kernel = np.array([
         [0, -1, 0],
         [-1, 6, -1],
         [0, -1, 0]
     ])
-    sharp6 = cv2.filter2D(enhanced6, -1, kernel6)
-    sharp6 = np.clip(sharp6, 0, 255).astype(np.uint8)
+    sharp = cv2.filter2D(enhanced, -1, kernel)
+    sharp = np.clip(sharp, 0, 255).astype(np.uint8)
     
-    results6 = reader.readtext(sharp6, **ocr_params)
-    if results6:
-        text6 = "".join([r[1] for r in results6])
-        conf6 = np.mean([r[2] for r in results6])
-        attempts.append((text6, conf6, "ultra_high_scale"))
+    # Try both normal and inverted
+    # Normal threshold
+    _, binary = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Pass 7: Adaptive threshold variant
-    h, w = img_deskewed.shape[:2]
-    scale7 = 4.0 if min(h, w) < 100 else 3.5
-    img7 = cv2.resize(img_deskewed, None, fx=scale7, fy=scale7, interpolation=cv2.INTER_CUBIC)
-    if len(img7.shape) == 3:
-        gray7 = cv2.cvtColor(img7, cv2.COLOR_BGR2GRAY)
-    else:
-        gray7 = img7.copy()
+    # OCR with very sensitive parameters
+    ocr_params = {
+        'detail': 1,
+        'paragraph': False,
+        'width_ths': 0.3,  # Very sensitive
+        'height_ths': 0.3,
+        'slope_ths': 0.1,
+        'allowlist': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    }
     
-    # Add padding
-    padding = 20
-    gray7 = cv2.copyMakeBorder(gray7, padding, padding, padding, padding, 
-                               cv2.BORDER_CONSTANT, value=255)
+    # Try normal first
+    results = reader.readtext(binary, **ocr_params)
+    if not results:
+        # Try inverted
+        inverted = cv2.bitwise_not(binary)
+        results = reader.readtext(inverted, **ocr_params)
     
-    # Adaptive threshold with better parameters
-    # Use larger block size and constant to avoid over-thresholding
-    adaptive = cv2.adaptiveThreshold(
-        gray7, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 15, 5  # Larger block size (15 vs 11), more constant (5 vs 2)
-    )
+    if not results:
+        return None, 0.0
     
-    results7 = reader.readtext(adaptive, **ocr_params)
-    if results7:
-        text7 = "".join([r[1] for r in results7])
-        conf7 = np.mean([r[2] for r in results7])
-        attempts.append((text7, conf7, "adaptive_thresh"))
+    text = "".join([r[1] for r in results])
+    confidence = np.mean([r[2] for r in results])
     
-    # Pick best result - not just by confidence, but also by pattern validation
-    if not attempts:
-        if return_all_attempts:
-            return "", 0.0, "none", []
-        return "", 0.0, "none"
+    return text, confidence
+
+
+def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7):
+    """
+    Validate OCR result based on confidence and pattern matching.
     
-    # Score each attempt: confidence + pattern validation
-    scored_attempts = []
-    for text, conf, method in attempts:
-        pattern_score = validate_vn_plate_pattern(text)
-        # Combined score: 70% confidence + 30% pattern validation
-        combined_score = conf * 0.7 + pattern_score * 0.3
-        scored_attempts.append((text, conf, method, combined_score, pattern_score))
+    Args:
+        text: Raw OCR text
+        confidence: OCR confidence score (0.0-1.0)
+        min_confidence: Minimum confidence threshold
+        min_pattern_score: Minimum pattern validation score
+    
+    Returns:
+        bool: True if result is valid, False otherwise
+    """
+    if not text or confidence < min_confidence:
+        return False
+    
+    pattern_score = validate_vn_plate_pattern(text)
+    if pattern_score < min_pattern_score:
+        return False
+    
+    return True
+
+
+def ocr_plate(img, use_multi_pass=True, return_all_attempts=False):
+    """
+    3-PASS WATERFALL OCR PIPELINE
+    
+    Waterfall logic:
+    1. Run Pass 1 (clean) → if valid → STOP
+    2. Run Pass 2 (robust) → if valid → STOP
+    3. Run Pass 3 (fallback) → return result (even if not perfect)
+    
+    Args:
+        img: Input cropped license plate image
+        use_multi_pass: If False, only run Pass 1
+        return_all_attempts: If True, return all attempts (for debugging)
+    
+    Returns:
+        (text, confidence, method_used) or (text, confidence, method, all_attempts) if return_all_attempts=True
+    """
+    if not use_multi_pass:
+        # Single pass mode - only Pass 1
+        text, confidence = _ocr_pass_1_clean(img)
+        if text:
+            return text, confidence, "pass1_clean"
+        return "", 0.0, "pass1_clean"
+    
+    # Waterfall: Pass 1 → Pass 2 → Pass 3
+    all_attempts = []
+    
+    # PASS 1: Clean pass
+    text, confidence = _ocr_pass_1_clean(img)
+    if text:
+        normalized = normalize_plate(text)
+        all_attempts.append((text, confidence, "pass1_clean"))
         
-        # DEBUG: Print pattern validation details
-        if return_all_attempts:
-            clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
-            pos3_char = clean_text[2] if len(clean_text) > 2 else "N/A"
-            pos3_type = "LETTER" if pos3_char.isalpha() else "NUMBER"
-            print(f"  DEBUG: {method}: text='{text}' -> clean='{clean_text}' -> pos3='{pos3_char}' ({pos3_type}) -> pattern={pattern_score:.2f}")
+        # Validate using normalized text, but return raw text
+        if _is_valid_result(normalized, confidence, min_confidence=0.6, min_pattern_score=0.8):
+            if return_all_attempts:
+                return text, confidence, "pass1_clean", all_attempts
+            return text, confidence, "pass1_clean"
+    
+    # PASS 2: Robust pass
+    text, confidence = _ocr_pass_2_robust(img)
+    if text:
+        normalized = normalize_plate(text)
+        all_attempts.append((text, confidence, "pass2_robust"))
         
-        # DEBUG: Print pattern validation details
+        # Validate using normalized text, but return raw text
+        if _is_valid_result(normalized, confidence, min_confidence=0.5, min_pattern_score=0.7):
+            if return_all_attempts:
+                return text, confidence, "pass2_robust", all_attempts
+            return text, confidence, "pass2_robust"
+    
+    # PASS 3: Fallback pass (always return result, even if not perfect)
+    text, confidence = _ocr_pass_3_fallback(img)
+    if text:
+        all_attempts.append((text, confidence, "pass3_fallback"))
+        
         if return_all_attempts:
-            clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
-            pos3_char = clean_text[2] if len(clean_text) > 2 else "N/A"
-            print(f"  DEBUG: {method}: text='{text}' -> clean='{clean_text}' -> pos3='{pos3_char}' -> pattern={pattern_score:.2f}")
+            return text, confidence, "pass3_fallback", all_attempts
+        return text, confidence, "pass3_fallback"
     
-    # Sort by combined score (descending)
-    scored_attempts.sort(key=lambda x: x[3], reverse=True)
-    
-    # Get best result
-    best = scored_attempts[0]
-    best_text, best_conf, best_method = best[0], best[1], best[2]
-    
+    # All passes failed
     if return_all_attempts:
-        # Return all attempts with scores for debugging
-        all_attempts_with_scores = [(t, c, m, cs, ps) for t, c, m, cs, ps in scored_attempts]
-        return best_text, best_conf, best_method, [(t, c, m) for t, c, m, _, _ in scored_attempts]
-    return best_text, best_conf, best_method
+        return "", 0.0, "none", all_attempts
+    return "", 0.0, "none"
 
 # ----------------------------------------------------------
 # Validate Vietnamese plate pattern
