@@ -109,3 +109,4 @@ When debug is enabled, the following images are saved (in order):
 - **Production safe**: Default behavior (`debug=False`) is identical to original code
 - **Instrumentation only**: This is for debugging, not for modifying pipeline behavior
 
+

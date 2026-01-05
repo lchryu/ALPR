@@ -129,3 +129,4 @@ Output saved to: runs/vis_20241201_143022
 - EasyOCR
 - All dependencies from `requirements.txt`
 
+
