@@ -1,3 +1,0 @@
-Raw: IJ16J101YID
-Confidence: 0.367
-Method: pass2_robust

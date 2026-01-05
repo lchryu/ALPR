@@ -1,3 +1,0 @@
-Raw: ICT327
-Confidence: 0.341
-Method: pass2_robust

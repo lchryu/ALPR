@@ -1,3 +1,0 @@
-Raw: IJI0J081
-Confidence: 0.116
-Method: pass3_fallback

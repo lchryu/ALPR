@@ -1,3 +1,0 @@
-Raw: VJ0J4
-Confidence: 0.371
-Method: pass1_clean

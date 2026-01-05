@@ -1,6 +1,5 @@
 ultralytics==8.0.196
 roboflow
 opencv-python-headless==4.7.0.72
-pytesseract
 numpy
 matplotlib

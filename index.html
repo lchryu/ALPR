@@ -520,6 +520,15 @@
     const debugInfo = document.getElementById("debugInfo");
 
     let currentFile = null;
+    let resultsDisplayed = false; // Track if results are currently displayed
+
+    // Helper function to escape HTML
+    function escapeHtml(text) {
+      if (text == null) return "";
+      const div = document.createElement("div");
+      div.textContent = String(text);
+      return div.innerHTML;
+    }
 
     // Debug toggle handler
     debugToggle.addEventListener("change", (e) => {
@@ -532,11 +541,16 @@
       }
     });
 
-    function resetUI() {
-      resultArea.style.display = "none";
-      jsonArea.style.display = "none";
-      errorBox.style.display = "none";
-      errorBox.textContent = "";
+    function resetUI(force = false) {
+      // Only reset if forced or if no results are currently displayed
+      // This prevents accidental resets when clicking on resultArea elements
+      if (force || !resultsDisplayed) {
+        resultArea.style.display = "none";
+        jsonArea.style.display = "none";
+        errorBox.style.display = "none";
+        errorBox.textContent = "";
+        resultsDisplayed = false;
+      }
     }
 
     function setLoading(isLoading) {
@@ -554,7 +568,7 @@
     function handleFile(file) {
       if (!file) return;
       currentFile = file;
-      resetUI();
+      resetUI(true); // Force reset when new file is selected
 
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -565,13 +579,20 @@
       reader.readAsDataURL(file);
     }
 
-    uploadBox.addEventListener("click", () => {
-      fileInput.click();
+    uploadBox.addEventListener("click", (e) => {
+      // Only trigger if clicking directly on uploadBox, not on child elements
+      // This prevents event bubbling from resultArea links
+      if (e.target === uploadBox || e.target.closest('.upload-title') || e.target.closest('.upload-subtext')) {
+        fileInput.click();
+      }
     });
 
     fileInput.addEventListener("change", (e) => {
       const file = e.target.files[0];
-      handleFile(file);
+      // Only handle file if a file was actually selected (not cancelled)
+      if (file) {
+        handleFile(file);
+      }
     });
 
     uploadBox.addEventListener("dragover", (e) => {
@@ -595,11 +616,11 @@
       currentFile = null;
       fileInput.value = "";
       previewWrapper.style.display = "none";
-      resetUI();
+      resetUI(true); // Force reset when clearing
     });
 
     sendBtn.addEventListener("click", async () => {
-      resetUI();
+      resetUI(true); // Force reset when sending new request
 
       if (!currentFile) {
         errorBox.style.display = "block";
@@ -638,14 +659,62 @@
         jsonArea.style.display = "block";
         jsonArea.textContent = JSON.stringify(data, null, 2);
 
+        console.log(`[Debug] Data received:`, data);
+        console.log(`[Debug] Results count:`, data.results?.length || 0);
+        console.log(`[Debug] Debug mode enabled:`, debugEnabled);
+        console.log(`[Debug] Debug info in response:`, data.debug);
+
+        // Build debug info FIRST (before checking results)
+        // This ensures debug info is always shown when debug mode is enabled
+        // Wrap in try-catch to prevent errors from breaking the display
+        let debugStatusHtml = "";
+        try {
+          if (debugEnabled && data.debug) {
+            const debugInfo = data.debug;
+            const folderName = (debugInfo.debug_folder_name || "unknown").replace(/"/g, "&quot;");
+            const imageCount = debugInfo.debug_images_count || 0;
+            const debugImages = Array.isArray(debugInfo.debug_images) ? debugInfo.debug_images : [];
+            
+            // Build debug images preview (first 5 images)
+            let imagesPreview = "";
+            if (debugImages.length > 0) {
+              const previewImages = debugImages.slice(0, 5);
+              imagesPreview = previewImages.map(img => {
+                const safeImg = String(img || "").replace(/"/g, "&quot;");
+                const imageUrl = `http://127.0.0.1:8000/debug/images/${encodeURIComponent(folderName)}/${encodeURIComponent(safeImg)}`;
+                return `<div style="margin-top: 4px;"><a href="${imageUrl}" target="_blank" onclick="event.stopPropagation();" style="color: #6ee7b7; text-decoration: underline; font-size: 10px;">📷 ${safeImg}</a></div>`;
+              }).join("");
+              
+              if (debugImages.length > 5) {
+                imagesPreview += `<div style="font-size: 10px; color: #9ca3af; margin-top: 4px;">... và ${debugImages.length - 5} ảnh khác</div>`;
+              }
+            }
+            
+            debugStatusHtml = `<div class="result-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(55, 65, 81, 0.5);"><div style="color: #6ee7b7; font-size: 11px; font-weight: 600;">🔍 Debug Mode:</div><div style="font-size: 11px; color: #bbf7b0; margin-top: 4px;"><div style="margin-bottom: 4px;">📁 Folder: <code style="background: rgba(0,0,0,0.3); padding: 2px 4px; border-radius: 3px; font-size: 10px;">${folderName}</code></div><div style="margin-bottom: 4px;">📊 Images: <strong>${imageCount}</strong> files</div>${imagesPreview ? `<div style="margin-top: 6px; max-height: 120px; overflow-y: auto;">${imagesPreview}</div>` : ''}</div></div>`;
+          } else if (debugEnabled) {
+            // Debug enabled but no debug info in response
+            debugStatusHtml = `<div class="result-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(55, 65, 81, 0.5);"><div style="color: #facc15; font-size: 11px;">⚠️ Debug Mode:</div><div style="font-size: 11px; color: #fde68a;">Debug mode enabled nhưng không có thông tin debug trong response. Kiểm tra server logs để xem debug folder path.</div></div>`;
+          }
+        } catch (debugError) {
+          console.error("[Debug] Error building debug HTML:", debugError);
+          // Don't break the flow - just log the error
+          const errorMsg = escapeHtml(String(debugError.message || debugError));
+          debugStatusHtml = debugEnabled ? `<div class="result-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(55, 65, 81, 0.5);"><div style="color: #ef4444; font-size: 11px;">⚠️ Lỗi khi hiển thị debug info: ${errorMsg}</div></div>` : "";
+        }
+
+        // Handle case when no results found
         if (!data.results || data.results.length === 0) {
+          console.log(`[Debug] No results found, showing empty message`);
           resultArea.style.display = "block";
-          resultArea.innerHTML =
-            "<div>Không tìm thấy biển số nào trong ảnh.</div>";
+          let noResultsHtml = "<div style='margin-bottom: 8px;'>Không tìm thấy biển số nào trong ảnh.</div>";
+          resultArea.innerHTML = noResultsHtml + debugStatusHtml;
+          resultsDisplayed = true; // Mark results as displayed
           return;
         }
 
+        // Process results
         const first = data.results[0];
+        console.log(`[Debug] First result:`, first);
 
         const plate = first.plate ?? "N/A";
         const raw = first.raw ?? "N/A";
@@ -661,55 +730,53 @@
         const twoLine = first.two_line ? "2 dòng" : "1 dòng";
         const bbox = first.bbox ? JSON.stringify(first.bbox) : "N/A";
 
-        // Show debug info if debug mode was enabled
-        let debugStatusHtml = "";
-        if (debugEnabled) {
-          debugStatusHtml = `
-          <div class="result-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(55, 65, 81, 0.5);">
-            <div style="color: #6ee7b7; font-size: 11px;">🔍 Debug Mode:</div>
-            <div style="font-size: 11px; color: #bbf7d0;">
-              Ảnh đã được lưu vào <code style="background: rgba(0,0,0,0.3); padding: 2px 4px; border-radius: 3px;">runs/debug/debug_&lt;timestamp&gt;/</code>
-            </div>
-          </div>
-          `;
-        }
-
+        // Display results with debug info
+        // Escape all user data to prevent XSS and HTML injection
+        const safePlate = escapeHtml(plate);
+        const safeRaw = escapeHtml(raw);
+        const safeMethod = escapeHtml(method);
+        const safeTwoLine = escapeHtml(twoLine);
+        const safeBbox = escapeHtml(bbox);
+        const safeDetConf = escapeHtml(detConf);
+        const safeOcrConf = escapeHtml(ocrConf);
+        
         resultArea.style.display = "block";
         resultArea.innerHTML = `
           <div class="result-row">
             <div class="pill pill-plate">
               <span>Biển số:</span>
-              <span>${plate}</span>
+              <span>${safePlate}</span>
             </div>
             <div style="display:flex; gap:4px;">
-              <div class="pill pill-det">YOLO: ${detConf}</div>
-              <div class="pill pill-ocr">OCR: ${ocrConf}</div>
+              <div class="pill pill-det">YOLO: ${safeDetConf}</div>
+              <div class="pill pill-ocr">OCR: ${safeOcrConf}</div>
             </div>
           </div>
           <div class="result-row">
             <div>Raw OCR:</div>
             <div style="font-family: ui-monospace; color:#e5e7eb;">
-              ${raw}
+              ${safeRaw}
             </div>
           </div>
           <div class="result-row">
             <div>Phương pháp:</div>
             <div style="font-family: ui-monospace; color:#a5b4fc;">
-              ${method}
+              ${safeMethod}
             </div>
           </div>
           <div class="result-row">
             <div>Dạng biển:</div>
-            <div>${twoLine}</div>
+            <div>${safeTwoLine}</div>
           </div>
           <div class="result-row">
             <div>BBox YOLO:</div>
             <div style="font-family: ui-monospace; color:#fde68a;">
-              ${bbox}
+              ${safeBbox}
             </div>
           </div>
           ${debugStatusHtml}
         `;
+        resultsDisplayed = true; // Mark results as displayed
       } catch (err) {
         console.error(err);
         errorBox.style.display = "block";

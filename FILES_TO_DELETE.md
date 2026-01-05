@@ -1,25 +1,31 @@
 # 📋 Danh sách file nên xóa
 
-## 🗑️ **Files nên xóa ngay (Test/Noise)**
+## ✅ **ĐÃ XÓA (Hoàn thành)**
 
 ### Test Files
-- ✅ `ocr_paddle_test.py` - Test PaddleOCR (không dùng trong project)
-- ✅ `test_pytorch_version.py` - Test PyTorch version (không cần thiết)
-- ✅ `api/test_api.py` - Test script API (có thể tạo lại khi cần)
+- ✅ `ocr_paddle_test.py` - Test PaddleOCR (không dùng trong project) - **ĐÃ XÓA**
+- ✅ `test_pytorch_version.py` - Test PyTorch version (không cần thiết) - **ĐÃ XÓA**
+- ✅ `test_yolo_redetection.py` - Test script YOLO re-detection - **ĐÃ XÓA**
+- ✅ `test_bbox_simple.py` - Test script bbox đơn giản - **ĐÃ XÓA**
+- ✅ `api/test_api.py` - Test script API (có thể tạo lại khi cần) - **ĐÃ XÓA**
 
 ### Duplicate/Old Files
-- ✅ `gpt_visualize.py` - File visualization cũ (đã có `visualize_pipeline.py` mới)
-- ✅ `src/detect_visual.py` - Script visualization cũ (không dùng nữa)
+- ✅ `src/detect_visual.py` - Script visualization cũ (không dùng nữa) - **ĐÃ XÓA**
 
 ### Temporary Files
-- ✅ `COMMIT_MESSAGE.txt` - File tạm cho commit message (đã commit xong)
-- ✅ `DEBUG_LOGGER_SUMMARY.md` - Documentation tạm (có thể merge vào README)
-- ✅ `DEBUG_LOGGER_USAGE.md` - Documentation tạm (có thể merge vào README)
-- ✅ `VISUALIZE_PIPELINE_README.md` - Documentation tạm (có thể merge vào README)
-- ✅ `run_api_on_another_pc.md` - Note tạm (nếu không cần thì xóa)
+- ✅ `COMMIT_MESSAGE.txt` - File tạm cho commit message (đã commit xong) - **ĐÃ XÓA**
+- ✅ `DEBUG_LOGGER_SUMMARY.md` - Documentation tạm - **ĐÃ XÓA**
+- ✅ `DEBUG_LOGGER_USAGE.md` - Documentation tạm - **ĐÃ XÓA**
+- ✅ `VISUALIZE_PIPELINE_README.md` - Documentation tạm - **ĐÃ XÓA**
+- ✅ `TEST_REDETECTION_README.md` - Documentation tạm - **ĐÃ XÓA**
+- ✅ `run_api_on_another_pc.md` - Note tạm - **ĐÃ XÓA**
 
 ### Empty/Unused
-- ✅ `api/readme.md` - Kiểm tra xem có nội dung không, nếu empty thì xóa
+- ✅ `api/readme.md` - File empty - **ĐÃ XÓA**
+
+### Code Cleanup
+- ✅ Xóa 2 hàm không dùng trong `utils.py`: `detect_individual_characters()`, `detect_characters_vertical_projection()` (~260 dòng)
+- ✅ Xóa dependency không dùng: `pytesseract` từ `requirements.txt`
 
 ---
 

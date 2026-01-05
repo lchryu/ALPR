@@ -1,3 +1,0 @@
-Raw: CT7
-Confidence: 0.109
-Method: pass1_clean
