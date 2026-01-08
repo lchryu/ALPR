@@ -163,8 +163,9 @@ async def alpr_api(
             top, bottom = split_two_line_plate(crop_final)
 
             # OCR each line separately (deskew already applied, skip deskew in ocr_plate_complete)
-            top_raw, top_norm, top_conf, top_method = ocr_plate_complete(top, logger=logger, skip_deskew=True)
-            bot_raw, bot_norm, bot_conf, bot_method = ocr_plate_complete(bottom, logger=logger, skip_deskew=True)
+            # Use is_partial_line=True to relax validation for individual lines
+            top_raw, top_norm, top_conf, top_method = ocr_plate_complete(top, logger=logger, skip_deskew=True, is_partial_line=True)
+            bot_raw, bot_norm, bot_conf, bot_method = ocr_plate_complete(bottom, logger=logger, skip_deskew=True, is_partial_line=True)
 
             # Handle None values (OCR may return None if all passes fail)
             top_raw = top_raw if top_raw is not None else ""
@@ -172,9 +173,54 @@ async def alpr_api(
             
             raw = top_raw + bot_raw
             plate = normalize_plate(raw) if raw else ""
-
-            ocr_conf = (top_conf + bot_conf) / 2 if top_conf and bot_conf else max(top_conf or 0.0, bot_conf or 0.0)
-            method = f"{top_method}+{bot_method}"
+            
+            # Validate combined result (full plate pattern)
+            # If combined result is invalid, try single-line OCR as fallback
+            if plate:
+                from utils import validate_vn_plate_pattern
+                pattern_score = validate_vn_plate_pattern(plate)
+                combined_conf = (top_conf + bot_conf) / 2 if top_conf and bot_conf else max(top_conf or 0.0, bot_conf or 0.0)
+                
+                # If pattern score is too low, might be misclassified - try single-line
+                if pattern_score < 0.5 and combined_conf < 0.5:
+                    print(f"[Warning] Two-line result has low pattern score ({pattern_score:.2f}), trying single-line fallback...")
+                    # Try single-line OCR as fallback
+                    fallback_raw, fallback_plate, fallback_conf, fallback_method = ocr_plate_complete(crop_final, logger=logger, skip_deskew=True, is_partial_line=False)
+                    if fallback_plate and fallback_conf > combined_conf:
+                        fallback_pattern_score = validate_vn_plate_pattern(fallback_plate)
+                        if fallback_pattern_score > pattern_score:
+                            print(f"[Fallback] Using single-line result: {fallback_plate} (conf={fallback_conf:.2f}, pattern={fallback_pattern_score:.2f})")
+                            raw = fallback_raw if fallback_raw else ""
+                            plate = fallback_plate
+                            ocr_conf = fallback_conf
+                            method = f"fallback_{fallback_method}"
+                            is_two = False  # Update classification
+                        else:
+                            # Keep two-line result
+                            ocr_conf = combined_conf
+                            method = f"{top_method}+{bot_method}"
+                    else:
+                        # Keep two-line result
+                        ocr_conf = combined_conf
+                        method = f"{top_method}+{bot_method}"
+                else:
+                    # Two-line result is valid
+                    ocr_conf = combined_conf
+                    method = f"{top_method}+{bot_method}"
+            else:
+                # Both lines failed, try single-line fallback
+                print(f"[Warning] Both lines failed OCR, trying single-line fallback...")
+                fallback_raw, fallback_plate, fallback_conf, fallback_method = ocr_plate_complete(crop_final, logger=logger, skip_deskew=True, is_partial_line=False)
+                if fallback_plate:
+                    print(f"[Fallback] Using single-line result: {fallback_plate} (conf={fallback_conf:.2f})")
+                    raw = fallback_raw if fallback_raw else ""
+                    plate = fallback_plate
+                    ocr_conf = fallback_conf
+                    method = f"fallback_{fallback_method}"
+                    is_two = False  # Update classification
+                else:
+                    ocr_conf = 0.0
+                    method = f"{top_method}+{bot_method}"
 
         else:
             # Single-line plate (deskew already applied, skip deskew in ocr_plate_complete)

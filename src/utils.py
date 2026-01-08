@@ -115,11 +115,79 @@ def remove_plate_border(img, border_ratio=0.08, logger=None):
     return cropped
 
 # ----------------------------------------------------------
-# Detect if plate is 2-line or 1-line based on aspect ratio
+# Detect if plate is 2-line or 1-line based on aspect ratio and gap detection
 # ----------------------------------------------------------
 def is_two_line_plate(crop):
+    """
+    Classify plate as two-line (motorcycle) or single-line (car).
+    
+    Uses:
+    1. Aspect ratio (w/h < 3.2 suggests two-line)
+    2. Horizontal projection profile to detect gap between lines
+    
+    Args:
+        crop: Cropped plate image
+    
+    Returns:
+        bool: True if two-line plate, False if single-line
+    """
     h, w = crop.shape[:2]
     ratio = w / h
+    
+    # Primary check: aspect ratio
+    # Motorcycle plates: typically ratio < 3.2 (shorter and wider)
+    # Car plates: typically ratio > 3.5 (longer and narrower)
+    if ratio >= 3.5:
+        return False  # Definitely single-line
+    if ratio < 2.5:
+        return True   # Definitely two-line
+    
+    # Ambiguous range (2.5 <= ratio < 3.5): use gap detection
+    # Convert to grayscale if needed
+    if len(crop.shape) == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop
+    
+    # Apply threshold to get binary image
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Horizontal projection: sum pixels in each row
+    h_projection = np.sum(binary == 0, axis=1)  # Count black pixels (text)
+    
+    # Find gap: region with few text pixels (whitespace between lines)
+    # Look for a horizontal gap that's at least 10% of height
+    min_gap_height = max(3, int(h * 0.1))
+    
+    # Find rows with very few text pixels (potential gap)
+    gap_threshold = np.max(h_projection) * 0.2  # Gap has <20% of max text density
+    gap_rows = np.where(h_projection < gap_threshold)[0]
+    
+    if len(gap_rows) == 0:
+        return ratio < 3.2  # No gap found, fallback to ratio
+    
+    # Check if there's a continuous gap region
+    gap_regions = []
+    start = gap_rows[0]
+    for i in range(1, len(gap_rows)):
+        if gap_rows[i] - gap_rows[i-1] > 1:
+            # Gap broken, save previous region
+            if gap_rows[i-1] - start >= min_gap_height:
+                gap_regions.append((start, gap_rows[i-1]))
+            start = gap_rows[i]
+    # Check last region
+    if gap_rows[-1] - start >= min_gap_height:
+        gap_regions.append((start, gap_rows[-1]))
+    
+    # If found significant gap, likely two-line
+    if len(gap_regions) > 0:
+        # Check if gap is roughly in the middle (not at edges)
+        for gap_start, gap_end in gap_regions:
+            gap_center = (gap_start + gap_end) / 2
+            if 0.3 * h < gap_center < 0.7 * h:  # Gap in middle 40% of image
+                return True
+    
+    # No significant gap found, use ratio as fallback
     return ratio < 3.2
 
 # ----------------------------------------------------------
@@ -242,9 +310,72 @@ def crop_text_region(img, margin_ratio=0.05, logger=None):
 # Split 2-line motorcycle plate
 # ----------------------------------------------------------
 def split_two_line_plate(crop):
+    """
+    Split two-line motorcycle plate into top and bottom halves.
+    Tries to detect actual gap between lines, falls back to fixed split with overlap.
+    
+    Args:
+        crop: Two-line plate image
+    
+    Returns:
+        (top, bottom): Top and bottom halves
+    """
     h, w = crop.shape[:2]
-    mid = h // 2
-    return crop[0:mid, :], crop[mid:h, :]
+    
+    # Convert to grayscale if needed
+    if len(crop.shape) == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = crop
+    
+    # Apply threshold to get binary image
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Horizontal projection: sum pixels in each row
+    h_projection = np.sum(binary == 0, axis=1)  # Count black pixels (text)
+    
+    # Find gap: region with few text pixels (whitespace between lines)
+    min_gap_height = max(3, int(h * 0.08))  # Gap should be at least 8% of height
+    gap_threshold = np.max(h_projection) * 0.25  # Gap has <25% of max text density
+    
+    # Find rows with very few text pixels (potential gap)
+    gap_rows = np.where(h_projection < gap_threshold)[0]
+    
+    split_point = h // 2  # Default: split in middle
+    
+    if len(gap_rows) > 0:
+        # Find continuous gap regions
+        gap_regions = []
+        start = gap_rows[0]
+        for i in range(1, len(gap_rows)):
+            if gap_rows[i] - gap_rows[i-1] > 1:
+                # Gap broken, save previous region
+                if gap_rows[i-1] - start >= min_gap_height:
+                    gap_regions.append((start, gap_rows[i-1]))
+                start = gap_rows[i]
+        # Check last region
+        if gap_rows[-1] - start >= min_gap_height:
+            gap_regions.append((start, gap_rows[-1]))
+        
+        # Use the gap region closest to middle
+        if len(gap_regions) > 0:
+            # Find gap closest to center
+            center = h / 2
+            best_gap = min(gap_regions, key=lambda g: abs((g[0] + g[1]) / 2 - center))
+            split_point = (best_gap[0] + best_gap[1]) // 2
+    
+    # Use overlap to prevent losing characters at boundary
+    overlap = max(5, h // 10)  # 10% overlap, minimum 5 pixels
+    
+    # Top: from start to split_point + overlap
+    top_end = min(split_point + overlap, h)
+    top = crop[0:top_end, :]
+    
+    # Bottom: from split_point - overlap to end
+    bot_start = max(0, split_point - overlap)
+    bottom = crop[bot_start:h, :]
+    
+    return top, bottom
 
 # ----------------------------------------------------------
 # Deskew / Rotation Correction
@@ -922,7 +1053,7 @@ def _ocr_pass_3_fallback(img, logger=None):
     return text, confidence
 
 
-def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7):
+def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7, is_partial_line=False):
     """
     Validate OCR result based on confidence and pattern matching.
     
@@ -931,6 +1062,7 @@ def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7
         confidence: OCR confidence score (0.0-1.0)
         min_confidence: Minimum confidence threshold
         min_pattern_score: Minimum pattern validation score
+        is_partial_line: If True, this is a partial line from a two-line plate (relaxed validation)
     
     Returns:
         bool: True if result is valid, False otherwise
@@ -939,16 +1071,27 @@ def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7
     if not text:
         return False
     
-    # Edge case: Check text length (VN plates are typically 7-10 chars after normalization)
-    clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
-    if len(clean_text) < 5 or len(clean_text) > 15:
-        return False
-    
     # Edge case: Check confidence validity
     if confidence <= 0.0 or np.isnan(confidence) or np.isinf(confidence):
         return False
     
     if confidence < min_confidence:
+        return False
+    
+    clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
+    
+    if is_partial_line:
+        # For partial lines (from two-line plates), use relaxed validation
+        # Each line typically has 3-5 characters (e.g., "51G" or "31691")
+        if len(clean_text) < 2 or len(clean_text) > 6:
+            return False
+        # Don't require both letters and numbers in a single partial line
+        # Don't validate full pattern (will validate after combining)
+        return True
+    
+    # Full validation for complete plates
+    # Edge case: Check text length (VN plates are typically 7-10 chars after normalization)
+    if len(clean_text) < 5 or len(clean_text) > 15:
         return False
     
     # Edge case: Check if text has both letters and numbers (VN plates have both)
@@ -964,7 +1107,7 @@ def _is_valid_result(text, confidence, min_confidence=0.5, min_pattern_score=0.7
     return True
 
 
-def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, skip_deskew=False):
+def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, skip_deskew=False, is_partial_line=False):
     """
     3-PASS WATERFALL OCR PIPELINE
     
@@ -979,6 +1122,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, 
         return_all_attempts: If True, return all attempts (for debugging)
         logger: Optional DebugImageLogger for instrumentation (default: None)
         skip_deskew: If True, skip deskew (image already deskewed at higher level)
+        is_partial_line: If True, this is a partial line from a two-line plate (use relaxed validation)
     
     Returns:
         (text, confidence, method_used) or (text, confidence, method, all_attempts) if return_all_attempts=True
@@ -1011,6 +1155,16 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, 
     # Waterfall: Pass 1 → Pass 2 → Pass 3
     all_attempts = []
     
+    # Adjust validation thresholds for partial lines
+    if is_partial_line:
+        min_conf_pass1, min_pattern_pass1 = 0.4, 0.0  # Relaxed for partial lines
+        min_conf_pass2, min_pattern_pass2 = 0.3, 0.0
+        min_conf_pass3, min_pattern_pass3 = 0.2, 0.0
+    else:
+        min_conf_pass1, min_pattern_pass1 = 0.6, 0.8
+        min_conf_pass2, min_pattern_pass2 = 0.5, 0.7
+        min_conf_pass3, min_pattern_pass3 = 0.3, 0.5
+    
     # PASS 1: Clean pass (use image without border)
     text, confidence = _ocr_pass_1_clean(img_no_border, logger=logger)
     if text:
@@ -1018,7 +1172,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, 
         all_attempts.append((text, confidence, "pass1_clean"))
         
         # Validate using normalized text, but return raw text
-        if _is_valid_result(normalized, confidence, min_confidence=0.6, min_pattern_score=0.8):
+        if _is_valid_result(normalized, confidence, min_confidence=min_conf_pass1, min_pattern_score=min_pattern_pass1, is_partial_line=is_partial_line):
             if return_all_attempts:
                 return text, confidence, "pass1_clean", all_attempts
             return text, confidence, "pass1_clean"
@@ -1030,7 +1184,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, 
         all_attempts.append((text, confidence, "pass2_robust"))
         
         # Validate using normalized text, but return raw text
-        if _is_valid_result(normalized, confidence, min_confidence=0.5, min_pattern_score=0.7):
+        if _is_valid_result(normalized, confidence, min_confidence=min_conf_pass2, min_pattern_score=min_pattern_pass2, is_partial_line=is_partial_line):
             if return_all_attempts:
                 return text, confidence, "pass2_robust", all_attempts
             return text, confidence, "pass2_robust"
@@ -1042,7 +1196,7 @@ def ocr_plate(img, use_multi_pass=True, return_all_attempts=False, logger=None, 
         all_attempts.append((text, confidence, "pass3_fallback"))
         
         # Validate with lower thresholds but still validate (don't return garbage)
-        if _is_valid_result(normalized, confidence, min_confidence=0.3, min_pattern_score=0.5):
+        if _is_valid_result(normalized, confidence, min_confidence=min_conf_pass3, min_pattern_score=min_pattern_pass3, is_partial_line=is_partial_line):
             if return_all_attempts:
                 return text, confidence, "pass3_fallback", all_attempts
             return text, confidence, "pass3_fallback"
@@ -1193,7 +1347,7 @@ def normalize_plate(text):
 # ----------------------------------------------------------
 # Complete OCR pipeline for plate
 # ----------------------------------------------------------
-def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False, logger=None, skip_deskew=False):
+def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False, logger=None, skip_deskew=False, is_partial_line=False):
     """
     Complete OCR pipeline: preprocess -> OCR -> normalize
     Returns: (raw_text, normalized_text, confidence, method)
@@ -1205,13 +1359,14 @@ def ocr_plate_complete(img, use_multi_pass=True, return_all_attempts=False, logg
         return_all_attempts: If True, return all attempts (for debugging)
         logger: Optional DebugImageLogger for instrumentation (default: None)
         skip_deskew: If True, skip deskew (image already deskewed at higher level)
+        is_partial_line: If True, this is a partial line from a two-line plate (use relaxed validation)
     """
     if return_all_attempts and use_multi_pass:
         # Get all attempts for visualization
-        raw_text, confidence, method, all_attempts = ocr_plate(img, use_multi_pass=use_multi_pass, return_all_attempts=True, logger=logger, skip_deskew=skip_deskew)
+        raw_text, confidence, method, all_attempts = ocr_plate(img, use_multi_pass=use_multi_pass, return_all_attempts=True, logger=logger, skip_deskew=skip_deskew, is_partial_line=is_partial_line)
         normalized = normalize_plate(raw_text)
         return raw_text, normalized, confidence, method, all_attempts
     else:
-        raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass, logger=logger, skip_deskew=skip_deskew)
+        raw_text, confidence, method = ocr_plate(img, use_multi_pass=use_multi_pass, logger=logger, skip_deskew=skip_deskew, is_partial_line=is_partial_line)
         normalized = normalize_plate(raw_text)
         return raw_text, normalized, confidence, method
