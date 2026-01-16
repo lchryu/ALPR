@@ -1,0 +1,32 @@
+# Config file với API keys (không commit vào git)
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Models và data
+models/*.pt
+!models/.gitkeep
+data/
+runs/
+
+# Debug outputs (có thể xóa thủ công nếu muốn)
+runs/debug/
+src/runs/
+
+# Debug
+*.log
+
