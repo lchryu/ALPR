@@ -36,13 +36,13 @@ def run_alpr_on_image(
     Returns:
         Dictionary with:
         - results: List of detection results, each containing:
-          - bbox: [x1, y1, x2, y2]
-          - raw: Raw OCR text
-          - plate: Normalized plate number
-          - det_conf: YOLO detection confidence
-          - ocr_conf: OCR confidence
-          - method: OCR method used (pass1_clean, pass2_robust, pass3_fallback, none)
-          - two_line: Whether plate was classified as two-line
+            - bbox: [x1, y1, x2, y2]
+            - raw: Raw OCR text
+            - plate: Normalized plate number
+            - det_conf: YOLO detection confidence
+            - ocr_conf: OCR confidence
+            - method: OCR method used (pass1_clean, pass2_robust, pass3_fallback, none)
+            - two_line: Whether plate was classified as two-line
         - debug: Debug info dict (if debug_logger enabled)
     """
     # Instrumentation: log input image
@@ -135,7 +135,7 @@ def run_alpr_on_image(
             plate = normalize_plate(raw) if raw else ""
             
             # Validate combined result (full plate pattern)
-            # If combined result is invalid, try single-line OCR as fallback
+            # If a combined result is invalid, try single-line OCR as fallback
             if plate:
                 pattern_score = validate_vn_plate_pattern(plate)
                 combined_conf = (top_conf + bot_conf) / 2 if top_conf and bot_conf else max(top_conf or 0.0, bot_conf or 0.0)

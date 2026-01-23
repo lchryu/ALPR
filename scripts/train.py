@@ -69,12 +69,12 @@ def train_yolo(data_yaml):
         data=data_yaml,
         epochs=50,
         imgsz=640,
-        batch=4,        # GTX 1060 → batch=4 là vừa
+        batch=4,        # GTX 1060 → batch=4
         device=0,       # GPU
         name="alpr_local",
         patience=10,
         
-        # 🔥 STABILITY MODE (để không lỗi)
+        # 🔥 STABILITY MODE
         mosaic=0,
         plots=False,
         verbose=False,

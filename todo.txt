@@ -1,0 +1,1 @@
+ocr_plate_complete: dùng để làm gì (Nguyện cả pipeline) ?
